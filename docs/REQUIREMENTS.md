@@ -35,7 +35,7 @@ Build one flow deeply — **hold seats → pay → confirm → notify** — as a
 | F8 | Seat map (live) | Socket.IO + Redis adapter; updates for everyone viewing a show |
 | F9 | Seat locking / hold | Max 10 seats per booking; all-or-nothing; hold lasts 10 minutes |
 | F10 | Booking | State machine, confirmed only after payment |
-| F11 | Payment | Razorpay (test mode) behind a `PaymentGateway` interface; order creation, webhook with signature verification |
+| F11 | Payment | Stripe (test mode) behind a `PaymentGateway` interface; PaymentIntent creation, webhook with `Stripe-Signature` verification |
 | F12 | Cancellation & refund | `RefundPolicy` in Booking domain (e.g. full >24h before show, 50% until 2h before, none after) |
 | F13 | Notifications | Email ticket with QR code; show reminders; in-app notifications; retry with backoff, DLQ after 3 failures |
 | F14 | Reviews & ratings | One review per user per movie; only users with a confirmed booking for a finished show; avg rating recalculated on `ReviewPosted` and cached in Redis |
@@ -85,7 +85,7 @@ Use: **Show, Screen, Seat, ShowSeat, SeatHold, Booking, Payment, Refund**. Never
 
 ## 5. Target architecture
 
-Two Next.js apps → one NestJS API gateway → 5 services, each with its own Postgres DB. Services never read each other's tables; they communicate via events on RabbitMQ (sync REST calls kept rare).
+Two Next.js apps → one NestJS API gateway → 5 services sharing **one PostgreSQL database, with one schema per bounded context** (see §5.1). Services never read each other's schemas; they communicate via events on RabbitMQ (sync REST calls kept rare).
 
 | Service | Contexts |
 |---|---|
@@ -96,6 +96,29 @@ Two Next.js apps → one NestJS API gateway → 5 services, each with its own Po
 | `notification-service` | Notification |
 | `gateway` | JWT verification, rate limiting (Redis, per user & IP), routing |
 
+### 5.1 Data ownership: one database, schema per context
+
+A single PostgreSQL database (`ticket_booking`) with one schema per bounded context. Each schema is owned by exactly one module/service.
+
+| Schema | Owner module → service | Example tables |
+|---|---|---|
+| `identity` | identity → identity-service | `users`, `refresh_tokens` |
+| `catalog` | catalog → catalog-service | `movies` |
+| `venue` | venue → catalog-service | `theatres`, `screens`, `seats` |
+| `scheduling` | scheduling → catalog-service | `shows`, `show_prices` |
+| `booking` | booking → booking-service | `bookings`, `booking_seats`, `show_seats`, `outbox`, `processed_events`, `idempotency_keys` |
+| `payment` | payment → payment-service | `payments`, `refunds`, `outbox`, `processed_events`, `idempotency_keys` |
+| `notification` | notification → notification-service | `notifications`, `processed_events` |
+| `review` | review → catalog-service | `reviews`, `movie_ratings` |
+
+Rules:
+- Every TypeORM entity declares its schema: `@Entity({ schema: 'booking', name: 'show_seats' })`.
+- **No cross-schema joins, foreign keys or queries.** Other contexts are referenced by id only (e.g. `show_seats.show_id` is a plain `uuid`, not an FK to `scheduling.shows`). Data from another context arrives via events or an application port.
+- Each module owns its migrations, which only touch its own schema.
+- Outbox / `processed_events` / idempotency tables live inside each owning schema, so the state change and its event commit in the same transaction.
+- Optional hardening (Phase 5+): one DB role per service with `USAGE` only on its own schema, so a cross-schema read fails at the database.
+- Why (ADR): one database is cheaper to run and back up, while schemas keep the ownership boundaries visible and enforceable. Moving a schema to its own database later is a dump-and-restore, with no code changes beyond the connection string.
+
 ### Tech stack
 
 | Area | Choice |
@@ -104,11 +127,11 @@ Two Next.js apps → one NestJS API gateway → 5 services, each with its own Po
 | Frontend | Next.js App Router, TypeScript, Tailwind, TanStack Query |
 | Sync calls | REST; gRPC for one call as stretch |
 | Events | RabbitMQ |
-| Database | PostgreSQL per service, Prisma |
+| Database | One PostgreSQL database, one schema per bounded context; TypeORM (entities + versioned migrations) |
 | Cache / locks | Redis |
-| Delayed jobs | BullMQ (hold expiry, reminders, email retries) |
+| Delayed jobs | RabbitMQ delay queues: per-message TTL + dead-letter exchange (or the `rabbitmq_delayed_message_exchange` plugin) for hold expiry, reminders, email retries |
 | Realtime | Socket.IO + Redis adapter |
-| Payments | Razorpay test mode behind `PaymentGateway` |
+| Payments | Stripe test mode behind `PaymentGateway` |
 | Search | Postgres full-text (OpenSearch stretch only) |
 | Observability | pino JSON logs + correlation id, OpenTelemetry, Prometheus, Grafana |
 | Testing | Jest (domain), Testcontainers (DB), k6 (load) |
@@ -122,14 +145,14 @@ Two Next.js apps → one NestJS API gateway → 5 services, each with its own Po
 1. Redis hold: `SET hold:{showId}:{seatId} {bookingId} NX EX 600`.
 2. Multiple seats atomically via a **Lua script** (all or none).
 3. DB guard: `UPDATE show_seat SET status='HELD' WHERE id=? AND status='AVAILABLE'` + `version` column (optimistic locking). 0 rows ⇒ lost.
-4. Expiry: BullMQ job delayed 10 min → Booking `EXPIRED`, free seats in DB, push WebSocket update.
+4. Expiry: publish a `BookingHoldExpiryDue` message to a RabbitMQ delay queue (TTL 10 min → dead-letter to the expiry queue). The consumer marks the Booking `EXPIRED` (only if still `PENDING`), frees seats in DB, pushes a WebSocket update.
 
 **Proof:** 200 concurrent requests for one seat ⇒ exactly one success; repeat with 3 booking-service replicas.
 
 ### 6.2 Booking ↔ payment saga (choreography)
 1. Hold seats; create `Booking` `PENDING` with expiry.
-2. Client asks Payment to create a Razorpay order for the booking id.
-3. User pays in Razorpay checkout.
+2. Client asks Payment to create a Stripe PaymentIntent for the booking id (`bookingId` in metadata, idempotency key = booking id).
+3. User pays with Stripe Payment Element / Checkout.
 4. Webhook → verify signature → `Payment SUCCEEDED` → publish `PaymentSucceeded`.
 5. Booking → seats `BOOKED`, booking `CONFIRMED` → publish `BookingConfirmed`.
 6. Notification → email ticket with QR.
@@ -165,20 +188,20 @@ Hexagonal / ports-and-adapters, dependencies point inward:
 
 ```
 src/<context>/
-  domain/            pure TS — no NestJS, Prisma, Redis imports
+  domain/            pure TS — no NestJS, TypeORM, Redis imports
     *.aggregate.ts, value-objects/, events/, policies/, *.repository.ts (port interface)
   application/
     commands/        *.handler.ts (use cases: load → call domain → save → publish)
     queries/         read models (flat rows, light CQRS)
     ports/           seat-lock.port.ts, event-publisher.port.ts, ...
   infrastructure/
-    persistence/     prisma-*.repository.ts, *.mapper.ts
+    persistence/     *.orm-entity.ts, typeorm-*.repository.ts, *.mapper.ts
     redis/, messaging/ (outbox relay, consumers)
   presentation/      controllers, dto/, websocket gateways
 ```
 
 - **Rich domain model**: business rules live in aggregates, never set status from outside.
-- **Patterns**: State (status transitions), Strategy (refund policy, pricing), Factory, Repository (one per aggregate root), Adapter (Razorpay, Redis, Mailer), Observer (domain events), light CQRS via `@nestjs/cqrs`.
+- **Patterns**: State (status transitions), Strategy (refund policy, pricing), Factory, Repository (one per aggregate root), Adapter (Stripe, Redis, RabbitMQ, Mailer), Observer (domain events), light CQRS via `@nestjs/cqrs`.
 - **Error model**: domain errors mapped to HTTP status codes in one place (exception filter).
 
 ### LLD deliverables
@@ -214,7 +237,7 @@ Read replicas, partitioning `ShowSeat` by show date, virtual waiting room, CDN, 
 | 1. Foundation | 2–3 | Monorepo; NestJS app with Identity, Catalog, Venue modules; signup/login/refresh rotation/roles; admin APIs for movies, theatres, screens, layouts; Docker Compose | Domain unit tests run with no DB; Swagger shows all APIs; `docker compose up` starts everything |
 | 2. Scheduling & listing | 4 | Show aggregate, overlap rule, auto scheduler, listing by city/date/movie, Next.js admin panel | Overlapping shows rejected at domain **and** DB level |
 | 3. Booking core | 5–6 | ShowSeat creation from `ShowScheduled`, seat hold, Booking state machine, hold expiry, live seat map | 200 parallel requests → exactly one wins; hold frees after 10 min |
-| 4. Payment & cancellation | 7 | Razorpay test mode, payment module, confirm flow, late-payment refund, cancellation + refund policy, QR ticket email | Kill app between payment and confirmation, restart → booking still confirms |
+| 4. Payment & cancellation | 7 | Stripe test mode, payment module, confirm flow, late-payment refund, cancellation + refund policy, QR ticket email | Kill app between payment and confirmation, restart → booking still confirms |
 | 5. Split into services | 8 | Extract notification → payment → booking; gateway; shared events package | Stop notification-service, book, restart → email still arrives |
 | 6. Reviews & observability | 9 | Reviews/ratings, in-app notifications, correlation ids, dashboards, rate limiting | One booking visible as a single trace across gateway, booking, payment, notification |
 | 7. Deploy & present | 10 | CI pipeline, deployment, load test, README, demo video | Live URL, load test graph, rehearsed 2‑min walkthrough |

@@ -10,7 +10,7 @@ Core flow to get right: **hold seats → pay → confirm → notify**.
 
 ### Current state
 - Fresh NestJS 11 scaffold (`src/app.*`), npm (`package-lock.json`), Jest, ESLint, Prettier.
-- Strategy: **modular monolith first** (one NestJS app, strict module boundaries), split into 5 services + gateway in Phase 5. Do not introduce microservices, RabbitMQ or a monorepo split before the plan calls for it.
+- Strategy: **modular monolith first** (one NestJS app, strict module boundaries), split into 5 services + gateway in Phase 5. Do not introduce microservices or a monorepo split before the plan calls for it. RabbitMQ arrives in Phase 3 for delayed jobs (hold expiry) and becomes the service-to-service event bus in Phase 5.
 
 ## Commands
 
@@ -46,14 +46,16 @@ When asked to review: point to lines and explain which rule is broken; don't sil
 
 ### Bounded contexts (modules under `src/`)
 `identity`, `catalog`, `venue`, `scheduling`, `booking` (core), `payment`, `notification`, `review`.
-Modules **must not** import another module's domain or infrastructure, or read its tables. Cross-context communication is via domain events (in-process event bus now, RabbitMQ later) or a narrow application-layer port.
+Modules **must not** import another module's domain or infrastructure, or read its tables.
+
+**Database:** one PostgreSQL database, **one schema per bounded context**, with the same names as the modules above. Every entity sets its schema (`@Entity({ schema: 'identity', name: 'users' })`). No cross-schema joins, foreign keys or queries: reference other contexts by id only. A module's migrations touch only its own schema. See `docs/REQUIREMENTS.md` §5.1. Cross-context communication is via domain events (in-process event bus now, RabbitMQ later) or a narrow application-layer port.
 
 ### Layers inside each context
 ```
 src/<context>/
-  domain/          pure TypeScript — NO @nestjs/*, Prisma, Redis, or other framework imports
+  domain/          pure TypeScript — NO @nestjs/*, TypeORM, Redis, or other framework imports
   application/     commands/, queries/ (use-case handlers), ports/ (interfaces)
-  infrastructure/  persistence/ (Prisma repos + mappers), redis/, messaging/
+  infrastructure/  persistence/ (TypeORM entities, repos + mappers), redis/, messaging/
   presentation/    controllers, dto/, websocket gateways
 ```
 Dependencies point inward only: presentation/infrastructure → application → domain.
@@ -63,7 +65,7 @@ Dependencies point inward only: presentation/infrastructure → application → 
 - Aggregates are small and reference each other **by id only**. One transaction modifies one aggregate; the rest happens via domain events.
 - Create aggregates through factories (`Booking.create(...)`) so invalid state can't exist.
 - Value objects are immutable (`Money`, `SeatRef`, `TimeSlot`, `HoldWindow`).
-- Repository interface lives in `domain/`; Prisma implementation in `infrastructure/persistence/`.
+- Repository interface lives in `domain/`; TypeORM implementation in `infrastructure/persistence/`.
 - Application handlers: load → call domain → save → publish events. No business rules in handlers.
 - Light CQRS via `@nestjs/cqrs`: commands mutate aggregates; queries read flat rows directly.
 - Domain errors are mapped to HTTP status codes in **one** exception filter.
@@ -82,11 +84,11 @@ Use **Show, Screen, Seat, ShowSeat, SeatHold, Booking, Payment, Refund**. Never 
 - Consumers are idempotent (`processed_events`); create-booking/create-payment honour `Idempotency-Key`.
 
 ## Tech stack
-PostgreSQL + Prisma · Redis (holds, cache, rate limit) · BullMQ (hold expiry, reminders, email retry) · Socket.IO + Redis adapter (live seat map) · Razorpay test mode behind a `PaymentGateway` port · JWT access + rotating httpOnly refresh token, roles `USER`/`ADMIN` · pino logs with correlation id · Jest + Testcontainers + k6.
+PostgreSQL (one DB, schema per context) + TypeORM · Redis (holds, cache, rate limit) · rabbitmq (hold expiry, reminders, email retry) · Socket.IO + Redis adapter (live seat map) · Stripe test mode behind a `PaymentGateway` port · JWT access + rotating httpOnly refresh token, roles `USER`/`ADMIN` · pino logs with correlation id · Jest + Testcontainers + k6.
 
 ## Coding conventions
 - TypeScript strict; no `any` in domain code.
-- File naming: `booking.aggregate.ts`, `money.vo.ts` or `value-objects/money.ts`, `booking-confirmed.event.ts`, `hold-seats.handler.ts`, `prisma-booking.repository.ts`, `redis-seat-lock.adapter.ts`.
+- File naming: `booking.aggregate.ts`, `money.vo.ts` or `value-objects/money.ts`, `booking-confirmed.event.ts`, `hold-seats.handler.ts`, `booking.orm-entity.ts`, `typeorm-booking.repository.ts`, `redis-seat-lock.adapter.ts`.
 - Domain unit tests must run without a database.
 - Config only from environment variables (`@nestjs/config`); never commit secrets or `.env`.
 - Every network call has a timeout and retry with backoff.
