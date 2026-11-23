@@ -5,6 +5,7 @@ import { CqrsModule } from '@nestjs/cqrs';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { buildTypeOrmOptions } from './database/typeorm-options';
 import { IdentityModule } from './identity/identity.module';
 import { DomainErrorFilter } from './shared/presentation/domain-error.filter';
 
@@ -15,15 +16,16 @@ import { DomainErrorFilter } from './shared/presentation/domain-error.filter';
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        type: 'postgres',
-        host: config.get<string>('DB_HOST', 'localhost'),
-        port: config.get<number>('DB_PORT', 5432),
-        username: config.getOrThrow<string>('DB_USER'),
-        password: config.getOrThrow<string>('DB_PASSWORD'),
-        database: config.getOrThrow<string>('DB_NAME'),
+        ...buildTypeOrmOptions((key) => config.get<string>(key), {
+          // compiled migrations; __dirname is dist/ at runtime
+          migrations: [
+            `${__dirname}/*/infrastructure/persistence/migrations/*.js`,
+          ],
+        }),
         autoLoadEntities: true,
-        // Dev only. Replace with versioned migrations before Phase 7.
-        synchronize: config.get<string>('DB_SYNCHRONIZE') === 'true',
+        // DB_MIGRATIONS_RUN=true applies pending migrations on boot (handy in
+        // dev/containers). In CI/prod prefer an explicit `npm run migration:run`.
+        migrationsRun: config.get<string>('DB_MIGRATIONS_RUN') === 'true',
       }),
     }),
     IdentityModule,

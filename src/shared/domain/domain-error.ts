@@ -8,7 +8,9 @@ export type DomainErrorKind =
   | 'CONFLICT'
   | 'UNAUTHENTICATED'
   | 'FORBIDDEN'
-  | 'INVALID_STATE';
+  | 'INVALID_STATE'
+  /** Asked too often (e.g. resend an OTP within the cooldown). */
+  | 'TOO_MANY_REQUESTS';
 
 export abstract class DomainError extends Error {
   abstract readonly code: string;

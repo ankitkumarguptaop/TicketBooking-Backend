@@ -6,7 +6,7 @@ import {
   UserRepository,
 } from '../../../domain/user.repository';
 import { GetUserProfileQuery } from './get-user-profile.query';
-import { UserProfileView } from './user-profile.view';
+import { toUserProfileView, UserProfileView } from './user-profile.view';
 
 @QueryHandler(GetUserProfileQuery)
 export class GetUserProfileHandler implements IQueryHandler<
@@ -21,12 +21,6 @@ export class GetUserProfileHandler implements IQueryHandler<
     const user = await this.users.findById(query.userId);
     if (!user) throw new UserNotFoundError(query.userId);
 
-    return {
-      id: user.id,
-      email: user.email.value,
-      fullName: user.fullName,
-      role: user.role,
-      createdAt: user.createdAt,
-    };
+    return toUserProfileView(user);
   }
 }

@@ -14,6 +14,7 @@ const STATUS_BY_KIND: Record<DomainErrorKind, HttpStatus> = {
   UNAUTHENTICATED: HttpStatus.UNAUTHORIZED,
   FORBIDDEN: HttpStatus.FORBIDDEN,
   INVALID_STATE: HttpStatus.UNPROCESSABLE_ENTITY,
+  TOO_MANY_REQUESTS: HttpStatus.TOO_MANY_REQUESTS,
 };
 
 /** The single place where domain errors become HTTP responses. */

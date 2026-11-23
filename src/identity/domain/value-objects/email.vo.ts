@@ -1,3 +1,15 @@
+import { InvalidEmailError } from '../errors/identity.errors';
+
+/** Matches the varchar(320) column: 64 (local) + 1 (@) + 255 (domain). */
+const MAX_LENGTH = 320;
+
+/**
+ * Pragmatic shape check, not full RFC 5322:
+ *   local part @ domain . tld, no whitespace, no second "@".
+ * Real proof that the address exists is the verification email.
+ */
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 /**
  * Email value object: immutable, always valid once created.
  */
@@ -5,16 +17,19 @@ export class Email {
   private constructor(private readonly _value: string) {}
 
   /**
-   * TODO(you): implement.
-   *  - trim + lowercase the raw input (so "A@x.com" and "a@x.com" are the same user)
-   *  - reject invalid formats by throwing InvalidEmailError
-   *  - return new Email(normalised)
-   * Hint: this is where the "email is unique" invariant becomes reliable,
-   * because uniqueness only works on a normalised value.
+   * The only way to build an Email from user input.
+   * Normalising here (trim + lowercase) means every path (register, login,
+   * future "change email") agrees that "A@x.com" and "a@x.com" are the same
+   * user, which is what makes the unique index on email reliable.
    */
   static create(raw: string): Email {
-    void raw;
-    throw new Error('Email.create not implemented yet');
+    const normalised = (raw ?? '').trim().toLowerCase();
+
+    if (normalised.length > MAX_LENGTH || !EMAIL_PATTERN.test(normalised)) {
+      throw new InvalidEmailError(raw);
+    }
+
+    return new Email(normalised);
   }
 
   /** Used by the persistence mapper for values already validated on write. */

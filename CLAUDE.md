@@ -22,7 +22,15 @@ npm run format         # prettier
 npm test               # unit tests (src/**/*.spec.ts)
 npm run test:e2e       # e2e (test/jest-e2e.json)
 npm run test:cov
+
+npm run migration:run       # apply pending migrations
+npm run migration:revert    # undo the last one
+npm run migration:show      # list applied / pending
+npm run migration:generate -- src/<context>/infrastructure/persistence/migrations/<Name>
+                            # diff entities vs DB into a new migration (review it before committing)
 ```
+
+Migrations live per context in `src/<context>/infrastructure/persistence/migrations/` and touch only that context's schema. `DB_SYNCHRONIZE` stays `false`.
 
 ## How Claude should help (important)
 

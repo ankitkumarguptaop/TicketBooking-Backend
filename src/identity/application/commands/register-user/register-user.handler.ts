@@ -37,6 +37,7 @@ export class RegisterUserHandler implements ICommandHandler<
       email,
       passwordHash: await this.hasher.hash(command.password),
       fullName: command.fullName,
+      phone: command.phone,
       now: new Date(),
     });
 
