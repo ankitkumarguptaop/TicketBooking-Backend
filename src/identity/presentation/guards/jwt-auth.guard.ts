@@ -1,11 +1,16 @@
 import {
   CanActivate,
   ExecutionContext,
+  Inject,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService, TokenExpiredError } from '@nestjs/jwt';
 import { Request } from 'express';
+import {
+  AUTH_SESSION_REPOSITORY,
+  AuthSessionRepository,
+} from '../../domain/session/auth-session.repository';
 import { ACCESS_TOKEN_COOKIE } from '../cookies/auth-cookies';
 import { AuthenticatedUser } from '../decorators/current-user.decorator';
 
@@ -17,10 +22,20 @@ import { AuthenticatedUser } from '../decorators/current-user.decorator';
  * so `alg: none` or a token minted for another audience is rejected.
  * An expired token gets code AUTH_TOKEN_EXPIRED: the client's cue to call
  * POST /auth/refresh once and retry.
+ *
+ * The JWT alone can't tell that its session was signed out from another
+ * device, so the session (`sid`) is also looked up on every request. A
+ * revoked or expired session gets AUTH_SESSION_REVOKED: the client's
+ * refresh then fails too, the cookies are cleared and the device is out
+ * at once instead of when the access token expires (up to 15 min later).
  */
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
-  constructor(private readonly jwt: JwtService) {}
+  constructor(
+    private readonly jwt: JwtService,
+    @Inject(AUTH_SESSION_REPOSITORY)
+    private readonly sessions: AuthSessionRepository,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context
@@ -44,6 +59,16 @@ export class JwtAuthGuard implements CanActivate {
 
     if (!claims.sub || !claims.sid || !claims.role) {
       throw this.unauthorized('AUTH_TOKEN_INVALID', 'Invalid access token');
+    }
+
+    // One primary-key lookup per request.
+    const session = await this.sessions.findById(claims.sid);
+    if (
+      !session ||
+      session.userId !== claims.sub ||
+      !session.isActive(new Date())
+    ) {
+      throw this.unauthorized('AUTH_SESSION_REVOKED', 'Session has ended');
     }
 
     request.user = {

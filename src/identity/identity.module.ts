@@ -44,6 +44,7 @@ import { JwtVerificationTokenService } from './infrastructure/security/jwt-verif
 import { AuthController } from './presentation/controllers/auth.controller';
 import { ChangePasswordController } from './presentation/controllers/change-password.controller';
 import { PasswordResetController } from './presentation/controllers/password-reset.controller';
+import { SessionEventsController } from './presentation/controllers/session-events.controller';
 import { RegistrationVerificationController } from './presentation/controllers/registration-verification.controller';
 import { UsersController } from './presentation/controllers/users.controller';
 import { VerificationController } from './presentation/controllers/verification.controller';
@@ -92,6 +93,7 @@ const JWT_ALGORITHM = 'HS256';
   ],
   controllers: [
     AuthController,
+    SessionEventsController,
     UsersController,
     VerificationController,
     RegistrationVerificationController,
@@ -155,6 +157,8 @@ const JWT_ALGORITHM = 'HS256';
     RolesGuard,
     VerificationTokenGuard,
   ],
-  exports: [JwtModule, JwtAuthGuard, RolesGuard],
+  // The repository is exported because JwtAuthGuard needs it wherever
+  // another module uses @UseGuards(JwtAuthGuard).
+  exports: [JwtModule, JwtAuthGuard, RolesGuard, AUTH_SESSION_REPOSITORY],
 })
 export class IdentityModule {}
