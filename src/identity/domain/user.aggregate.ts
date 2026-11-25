@@ -2,7 +2,11 @@ import { AggregateRoot } from '../../shared/domain/aggregate-root';
 import {
   InvalidFullNameError,
   InvalidPhoneError,
+  SuperAdminRoleImmutableError,
+  UserIsNotAdminError,
 } from './errors/identity.errors';
+import { AdminRoleGranted } from './events/admin-role-granted.event';
+import { AdminRoleRevoked } from './events/admin-role-revoked.event';
 import { ContactVerified } from './events/contact-verified.event';
 import { PasswordChanged } from './events/password-changed.event';
 import { UserRegistered } from './events/user-registered.event';
@@ -41,6 +45,8 @@ export interface RegisterUserParams {
   now: Date;
 }
 
+export type CreateSuperAdminParams = RegisterUserParams;
+
 /** Fields a user may change about themselves. Omitted = unchanged. */
 export interface UserDetailsChanges {
   fullName?: string;
@@ -50,7 +56,9 @@ export interface UserDetailsChanges {
 /**
  * User aggregate root (Identity context).
  * Invariants: email is unique (enforced with the repository + DB unique index),
- * new users always start with role USER.
+ * new users always start with role USER, ADMIN only comes from an approved
+ * admin-access request, and the one SUPER_ADMIN comes only from the seed
+ * and never changes role.
  */
 export class User extends AggregateRoot {
   private constructor(private props: UserProps) {
@@ -86,6 +94,59 @@ export class User extends AggregateRoot {
 
     user.raise(new UserRegistered(user.id, user.email.value, params.now));
     return user;
+  }
+
+  /**
+   * Factory for the single SUPER_ADMIN, used only by the seed script.
+   *  - same field rules as register()
+   *  - email counts as verified: the operator who runs the seed typed it,
+   *    there is no sign-up step for this account
+   *  - "only one super admin" needs the repository (and a unique index),
+   *    so the seed handler checks it
+   */
+  static createSuperAdmin(params: CreateSuperAdminParams): User {
+    const user = new User({
+      id: params.id,
+      email: params.email,
+      passwordHash: params.passwordHash,
+      fullName: User.validFullName(params.fullName),
+      phone: User.validPhone(params.phone),
+      role: UserRole.SUPER_ADMIN,
+      createdAt: params.now,
+      emailVerifiedAt: params.now,
+      phoneVerifiedAt: null,
+    });
+    user.raise(new UserRegistered(user.id, user.email.value, params.now));
+    return user;
+  }
+
+  /**
+   * Makes this user an ADMIN after a super admin approved their request.
+   * Idempotent: an event handler calls this, and events can arrive twice.
+   * Takes effect in tokens issued from now on (next refresh or login).
+   */
+  grantAdminRole(now: Date): void {
+    if (this.props.role === UserRole.SUPER_ADMIN) {
+      throw new SuperAdminRoleImmutableError();
+    }
+    if (this.props.role === UserRole.ADMIN) return;
+    this.props.role = UserRole.ADMIN;
+    this.raise(new AdminRoleGranted(this.id, now));
+  }
+
+  /**
+   * Back to USER. The handler of AdminRoleRevoked ends the user's sessions,
+   * because their current access token still carries role ADMIN.
+   */
+  revokeAdminRole(revokedBy: string, now: Date): void {
+    if (this.props.role === UserRole.SUPER_ADMIN) {
+      throw new SuperAdminRoleImmutableError();
+    }
+    if (this.props.role !== UserRole.ADMIN) {
+      throw new UserIsNotAdminError(this.id);
+    }
+    this.props.role = UserRole.USER;
+    this.raise(new AdminRoleRevoked(this.id, revokedBy, now));
   }
 
   /**

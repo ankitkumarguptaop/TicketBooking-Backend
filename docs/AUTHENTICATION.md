@@ -1,9 +1,13 @@
 # Authentication & Authorization — How It Works
 
 > A learning guide to the `identity` context: login, access tokens, refresh-token
-> rotation, logout, multi-device sessions and authorization. It covers **what**
-> happens, **why** it was designed this way, and **which attacks** each piece
-> stops (and which it doesn't yet).
+> rotation, logout, multi-device sessions, roles (USER / ADMIN / SUPER_ADMIN)
+> with admins by approval, and how identity's events leave through a
+> transactional outbox. It covers **what** happens, **why** it was designed
+> this way, and **which attacks** each piece stops (and which it doesn't yet).
+>
+> Contact verification and password reset are summarised in `docs/openapi.yaml`
+> (use cases UC-1, UC-5, UC-6) and the ADRs in `docs/adr/`.
 
 ---
 
@@ -22,14 +26,17 @@
 11. [Flow: Two requests racing the same token](#11-flow-two-requests-racing-the-same-token)
 12. [Flow: Logout, logout-all, revoke one session](#12-flow-logout-logout-all-revoke-one-session)
 13. [Session expiry (idle vs absolute)](#13-session-expiry-idle-vs-absolute)
-14. [Why this approach (design decisions)](#14-why-this-approach-design-decisions)
-15. [Vulnerabilities: threat model](#15-vulnerabilities-threat-model)
-16. [Known gaps and residual risks](#16-known-gaps-and-residual-risks)
-17. [Frontend contract](#17-frontend-contract)
-18. [Configuration](#18-configuration)
-19. [Try it with curl](#19-try-it-with-curl)
-20. [Code map](#20-code-map)
-21. [Interview questions to practise](#21-interview-questions-to-practise)
+14. [Roles and admins by approval](#14-roles-and-admins-by-approval)
+15. [Events: the transactional outbox](#15-events-the-transactional-outbox)
+16. [Housekeeping: deleting dead rows](#16-housekeeping-deleting-dead-rows)
+17. [Why this approach (design decisions)](#17-why-this-approach-design-decisions)
+18. [Vulnerabilities: threat model](#18-vulnerabilities-threat-model)
+19. [Known gaps and residual risks](#19-known-gaps-and-residual-risks)
+20. [Frontend contract](#20-frontend-contract)
+21. [Configuration](#21-configuration)
+22. [Try it with curl](#22-try-it-with-curl)
+23. [Code map](#23-code-map)
+24. [Interview questions to practise](#24-interview-questions-to-practise)
 
 ---
 
@@ -41,14 +48,19 @@ There are **two tokens** with opposite properties:
 |---|---|---|
 | Format | JWT (signed, self-contained) | Opaque random string |
 | Lifetime | 15 minutes | 7 days idle, 30 days absolute |
-| Checked by | Signature only, with **no database lookup** | Database lookup **every time** |
+| Checked by | Signature + **one primary-key lookup** of its session | Database lookup + hash compare **every time** |
 | Sent on | Every API request | Only `/auth/refresh` and `/auth/logout` |
-| Can be revoked instantly? | No (lives until `exp`) | Yes (revoke the session row) |
+| Can be revoked instantly? | Yes, indirectly: revoking its session (`sid`) makes the guard reject it | Yes (revoke the session row) |
 | Reusable? | Yes, until it expires | **No: single use, rotated each time** |
 
-The access token is **fast but unrevocable**, so it is short-lived. The refresh
-token is **revocable but needs a database hit**, so it is used rarely. Together
-they give fast requests *and* the ability to log someone out.
+The access token is **cheap to check** (signature + one indexed lookup to make
+sure its session is still alive) and short-lived. The refresh token is
+**single-use and rotated**, so a stolen copy is detected (§10). Together they
+give fast requests, instant logout, and theft detection.
+
+> Earlier versions checked the access token by signature only (zero DB hits),
+> so a logged-out token kept working for up to 15 minutes. The guard now also
+> loads the session by primary key on each request; see §7 for the trade-off.
 
 ```
 login ──► [access 15m] [refresh R1]
@@ -75,7 +87,9 @@ logout(R3)  ──► session revoked, cookies cleared
 | **Pepper** | A server-side secret key (in env, **not** in the DB) mixed into the refresh-token hash. |
 | **`sub`** | JWT claim: the user id. |
 | **`sid`** | JWT claim: the session id. Links an access token to the device login that produced it. |
-| **`jti`** | JWT claim: a unique id per access token (for a future denylist). |
+| **`jti`** | JWT claim: a unique id per access token (handy in logs; would key a denylist if one were ever needed). |
+| **Outbox** | The `identity.outbox` table: events are written there in the same transaction as the change that raised them, then published (§15). |
+| **Super admin** | The one `SUPER_ADMIN` account, created by the seed script. It approves admins (§14). |
 | **Authentication** | *Who are you?* (valid token) |
 | **Authorization** | *Are you allowed to do this?* (role, ownership) |
 
@@ -108,7 +122,7 @@ logout(R3)  ──► session revoked, cookies cleared
 {
   "sub":   "7c1e…",            // user id
   "email": "ankit@example.com",
-  "role":  "USER",             // USER | ADMIN
+  "role":  "USER",             // USER | ADMIN | SUPER_ADMIN
   "sid":   "3f1c2a8e-…",       // session (device) id
   "jti":   "b0a4…",            // unique per token
   "iat":   1767225600,
@@ -157,7 +171,8 @@ identity.user_sessions
 │ absolute_expires_at  │ created_at + 30d, never extended               │
 │ revoked_at           │ null while alive                               │
 │ revoked_reason       │ LOGOUT | LOGOUT_ALL | REVOKED_BY_USER |        │
-│                      │ REUSE_DETECTED | USER_GONE                     │
+│                      │ REUSE_DETECTED | USER_GONE | PASSWORD_RESET |  │
+│                      │ ROLE_CHANGED                                   │
 │ version              │ optimistic lock                                │
 └──────────────────────┴──────────────────────────────────────────────┘
 ```
@@ -200,10 +215,12 @@ sequenceDiagram
         H-->>B: 401 IDENTITY_INVALID_CREDENTIALS
     else wrong password
         H-->>B: 401 IDENTITY_INVALID_CREDENTIALS (same message)
+    else right password, email not verified
+        H-->>B: 403 IDENTITY_EMAIL_NOT_VERIFIED + verification cookie
     end
     H->>H: sessionId = uuid(), refresh = codec.generate(sessionId)
     H->>H: AuthSession.start(..., tokenHash = refresh.hash)
-    H->>S: save (INSERT, version 1)
+    H->>S: save: INSERT session + SessionStarted into outbox (one transaction)
     H->>H: sign access JWT {sub, email, role, sid, jti}
     H-->>C: { user, tokens }
     C->>B: Set-Cookie access_token, refresh_token (Path=/auth)<br/>body: { user, accessTokenExpiresAt }
@@ -221,6 +238,8 @@ Key points:
 4. The body contains the **profile**, not tokens, so the frontend can render
    "Hi Ankit" without a second request.
 5. Response has `Cache-Control: no-store` so no proxy or browser cache keeps it.
+6. **Only verified emails get a session.** The check runs *after* the password
+   check, so it reveals nothing to someone guessing emails.
 
 ---
 
@@ -233,6 +252,7 @@ sequenceDiagram
     autonumber
     participant B as Browser
     participant G as JwtAuthGuard
+    participant DB as user_sessions
     participant H as Handler
     B->>G: GET /users/me (Cookie: access_token=…)
     G->>G: token from cookie (or Authorization: Bearer)
@@ -244,11 +264,23 @@ sequenceDiagram
     else bad signature / wrong iss/aud / missing sub,sid,role
         G-->>B: 401 AUTH_TOKEN_INVALID
     end
+    G->>DB: findById(sid)  (primary key)
+    alt missing, other user's, revoked or expired
+        G-->>B: 401 AUTH_SESSION_REVOKED  (client: refresh fails too → sign in)
+    end
     G->>H: request.user = {sub, email, role, sid}
     H-->>B: 200
 ```
 
-- **No database call.** That is the whole point of a JWT access token.
+- **One database call: the session, by primary key.** A pure JWT check needs
+  no database, but then "sign out" can't reach a token that is already out
+  there. One indexed lookup per request buys instant logout, instant
+  "sign out that device", and instant demotion (§14). At this project's scale
+  it costs well under a millisecond. When it starts to matter, the same check
+  moves to Redis (`revoked:sid:<sid>`), still without touching Postgres.
+- The role is still read from the token, not the database, so a promotion
+  shows up at the next refresh (≤ 15 min). Demotions are instant because they
+  revoke sessions.
 - The guard copies only known claims into `request.user`, so extra claims in a
   token are ignored.
 - The access cookie deliberately lives **longer** than the JWT inside it
@@ -270,7 +302,7 @@ three different questions with three different answerers:
 | Question | Answered by | How |
 |---|---|---|
 | Is this a real, unexpired token? | `JwtAuthGuard` | Signature + claims |
-| Is this person an ADMIN? | `RolesGuard` + `@Roles(UserRole.ADMIN)` | `role` claim |
+| Is this person an ADMIN? | `RolesGuard` + `@Roles(UserRole.ADMIN)` | `role` claim, **ranked**: `SUPER_ADMIN` passes an `ADMIN` check |
 | Does this person own booking 8841 / session S1? | **The owning context's handler/aggregate** | Compare `sub` with the resource's `userId` |
 
 ```ts
@@ -279,6 +311,10 @@ three different questions with three different answerers:
 @Post('movies')
 createMovie(...) {}
 ```
+
+Roles are ranked `USER < ADMIN < SUPER_ADMIN` (`roleSatisfies()` in
+`domain/user-role.enum.ts`). With several roles in `@Roles(...)`, meeting any
+one is enough. Routes for approving admins use `@Roles(UserRole.SUPER_ADMIN)`.
 
 **Ownership example already in the code:** `DELETE /auth/sessions/:id`.
 
@@ -295,11 +331,15 @@ attacker enumerate ids. This is the defence against **IDOR** (Insecure Direct
 Object Reference), the #1 item in OWASP API Top 10 ("Broken Object Level
 Authorization").
 
-**Role freshness:** the `role` claim is a snapshot from issue time. If an admin
-is demoted, their access token still says ADMIN for up to 15 minutes. At the
-next refresh, claims are **rebuilt from the database**, so the demotion takes
-effect then. For instant effect, revoke their sessions (`logout-all`) and add
-the denylist from §16.
+**Role freshness:** the `role` claim is a snapshot from issue time, and claims
+are **rebuilt from the database** at every refresh.
+
+- **Promotion** (request approved): takes effect at the user's next refresh,
+  at most 15 minutes later. The app can call `POST /auth/refresh` right away.
+- **Demotion** (`DELETE /admins/:userId`): instant. `AdminRoleRevoked` is
+  handled by ending every session of that user (`ROLE_CHANGED`), and the guard
+  checks the session on every request, so the old ADMIN token stops working
+  at once.
 
 **Events and background jobs carry no token.** When Booking consumes
 `PaymentSucceeded`, the actor's user id travels inside the event payload. The
@@ -419,7 +459,7 @@ UPDATE identity.user_sessions
 **Trade-off:** two legitimate browser tabs refreshing at the same instant will
 log the user out. This is chosen on purpose (strict security over
 convenience). The frontend prevents it with a single in-flight refresh across
-tabs (§17). The softer alternative is a short grace window where the
+tabs (§20). The softer alternative is a short grace window where the
 just-rotated token is accepted for a few seconds. It is friendlier, but it
 reopens a small replay window. Many real systems use it; this project chooses
 strictness.
@@ -460,8 +500,9 @@ Requires a valid access token. Loads every active session of `sub`, revokes
 each one (`LOGOUT_ALL`), saves each separately (one aggregate per save), clears
 this device's cookies, and returns `{ revoked: n }`.
 
-Use it after a password change, when the user suspects compromise, or for a
-"sign out everywhere" button.
+Use it when the user suspects compromise, or for a "sign out everywhere"
+button. (Password reset already signs out every session by itself, and
+"change password" signs out every session except the current one.)
 
 ### 12.3 `GET /auth/sessions` and `DELETE /auth/sessions/:id`
 
@@ -471,11 +512,16 @@ Use it after a password change, when the user suspects compromise, or for a
   check, and someone else's session gets a 404. If you revoke your *own*
   current session, your cookies are cleared too.
 
-### 12.4 What logout does **not** do (yet)
+### 12.4 Logout reaches the access token too
 
-The access token in the attacker's or user's hands remains valid until its
-`exp`, **up to 15 minutes**, because access tokens are checked without a
-database. See §16 for the Redis denylist that closes this.
+Because the guard checks the session on every request (§7), a revoked
+session's access token is rejected **at once** with `AUTH_SESSION_REVOKED`,
+even though the JWT itself hasn't expired. Devices that keep
+`GET /auth/sessions/events` (Server-Sent Events) open are told immediately
+with a `session-revoked` event instead of on their next call.
+
+What it still can't do: stop a request that already passed the guard a
+moment before the revoke.
 
 ---
 
@@ -503,9 +549,199 @@ login                                             absolute (30d)
 
 ---
 
-## 14. Why this approach (design decisions)
+## 14. Roles and admins by approval
 
-### 14.1 Cookies vs `localStorage` for tokens
+Three roles, ranked:
+
+| Role | Who | How you get it |
+|---|---|---|
+| `USER` | Everyone who signs up | `POST /auth/register` |
+| `ADMIN` | Runs catalog, venues, shows | A `SUPER_ADMIN` approves your admin-access request |
+| `SUPER_ADMIN` | Exactly one account | `npm run seed:super-admin`; never through the API |
+
+### 14.1 The super admin (seeded)
+
+```bash
+SUPER_ADMIN_EMAIL=owner@example.com SUPER_ADMIN_PASSWORD='a-long-passphrase' \
+SUPER_ADMIN_FULL_NAME='Site Owner' SUPER_ADMIN_PHONE='+919800000000' \
+npm run seed:super-admin
+```
+
+- Runs the real use case (`SeedSuperAdminHandler`) inside a Nest application
+  context, so hashing, validation and the outbox are the same as for any user.
+- **Idempotent:** if a super admin exists it changes nothing (not even the
+  password), so it is safe to run on every deploy.
+- **Never promotes an existing account.** If the email already belongs to a
+  normal user it fails. A typo in an env var must not hand someone full control.
+- The email counts as verified (the operator typed it; there is no sign-up step).
+- The database allows **one** super admin: a unique index on a constant,
+  limited to `role = 'SUPER_ADMIN'` (`uq_users_single_super_admin`).
+- Its role can't be changed: `grantAdminRole` / `revokeAdminRole` throw
+  `IDENTITY_SUPER_ADMIN_ROLE_IMMUTABLE`.
+
+### 14.2 Becoming an admin
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User (verified, role USER)
+    participant API as Identity API
+    participant SA as Super admin
+    participant O as Outbox / event bus
+    U->>API: POST /admin-access-requests {reason}
+    API->>API: AdminAccessRequest.submit → PENDING<br/>(+ AdminAccessRequested in outbox)
+    SA->>API: GET /admin-access-requests?status=PENDING
+    SA->>API: POST /admin-access-requests/:id/approve {note?}
+    API->>API: request.approve → APPROVED<br/>(+ AdminAccessApproved in outbox, same tx)
+    API-->>SA: 200 request view
+    O->>API: AdminAccessApproved
+    API->>API: GrantAdminRoleOnApprovalHandler:<br/>user.grantAdminRole() → ADMIN (+ AdminRoleGranted)
+    U->>API: POST /auth/refresh
+    API-->>U: new access token, role = ADMIN
+```
+
+The request is a small aggregate with a state machine:
+
+```
+PENDING ──approve──▶ APPROVED
+   │ └───reject───▶ REJECTED
+   └─────cancel───▶ CANCELLED   (by the requester)
+```
+
+Rules (in `AdminAccessRequest`):
+
+- Only a `USER` with a **verified email** may submit
+  (`IDENTITY_NOT_ELIGIBLE_FOR_ADMIN_ACCESS`).
+- Reason is 10-500 characters; the super admin's note is optional, ≤ 500.
+- **One PENDING request per user**: checked by the handler for a friendly
+  error, and enforced by a partial unique index
+  (`uq_admin_access_requests_one_pending`) when two submits race.
+- Only PENDING requests change; every decision is final
+  (`IDENTITY_ADMIN_ACCESS_REQUEST_NOT_PENDING`).
+- Only the requester cancels; someone else's request answers **404**, like sessions.
+- Two super-admin tabs deciding at once: optimistic lock on `version`,
+  the loser gets `IDENTITY_CONCURRENT_ADMIN_ACCESS_UPDATE`.
+- Who may *decide* is a presentation rule (`@Roles(UserRole.SUPER_ADMIN)`),
+  because the domain has no idea who is calling.
+
+**Why two transactions?** Approving changes the request *and* the user.
+The project rule is one aggregate per transaction, so the request is saved
+with its `AdminAccessApproved` event, and the user changes in a handler of
+that event. The outbox guarantees the event isn't lost (§15), and
+`grantAdminRole` is idempotent, so a duplicate delivery is harmless.
+
+### 14.3 Removing an admin
+
+`DELETE /admins/:userId` (super admin only): `user.revokeAdminRole()` →
+`AdminRoleRevoked` → `EndSessionsOnAdminRoleRevokedHandler` revokes every
+session with `ROLE_CHANGED`. Because the guard checks the session on every
+request, the old ADMIN token stops working at once, and open
+`/auth/sessions/events` streams get `session-revoked`. The person can sign in
+again as a `USER`, and may ask again later.
+
+### 14.4 Endpoints
+
+| Route | Who | What |
+|---|---|---|
+| `POST /admin-access-requests` | verified USER | Ask, with a reason |
+| `GET /admin-access-requests/mine` | any signed-in user | My requests and their outcome |
+| `POST /admin-access-requests/:id/cancel` | the requester | Withdraw a pending request |
+| `GET /admin-access-requests?status=` | SUPER_ADMIN | Queue (PENDING oldest first) or history |
+| `POST /admin-access-requests/:id/approve` | SUPER_ADMIN | Approve, optional note |
+| `POST /admin-access-requests/:id/reject` | SUPER_ADMIN | Reject, optional note |
+| `GET /admins` | SUPER_ADMIN | Admins and the super admin, with `adminSince` |
+| `DELETE /admins/:userId` | SUPER_ADMIN | Demote to USER and end their sessions |
+
+---
+
+## 15. Events: the transactional outbox
+
+**Problem.** "Save, then publish" has a gap: if the process dies (or publish
+fails) after the commit, the state changed but the event never went out. For
+admins that would mean an approved request whose user never becomes ADMIN.
+
+**Fix.** Every repository `save()` does both writes in **one** transaction:
+
+```ts
+await manager.transaction(async (m) => {
+  await m.update(AuthSessionOrmEntity, { id, version }, changes);   // the aggregate
+  await appendToOutbox(m, session.pullDomainEvents());             // its events
+});
+outboxRelay.nudge();                                                // publish soon
+```
+
+```
+identity.outbox
+┌──────────────┬───────────────────────────────────────────────┐
+│ id           │ the event's own eventId (consumers dedupe on it) │
+│ event_type   │ registry name, e.g. "SessionRevoked"             │
+│ payload      │ jsonb: the event's fields                        │
+│ occurred_at  │                                                  │
+│ published_at │ NULL until the relay has handed it on            │
+│ attempts     │ failed publishes; the relay stops after 10       │
+│ last_error   │                                                  │
+└──────────────┴───────────────────────────────────────────────┘
+```
+
+**The relay** (`OutboxRelay`) reads unpublished rows oldest first with
+`SELECT … FOR UPDATE SKIP LOCKED`, rebuilds each event, publishes it to the
+event bus and stamps `published_at`, all in one transaction. It runs when a
+repository nudges it (so the session-revoked SSE stays instant) and every
+`OUTBOX_POLL_INTERVAL_MS` as a safety net. `SKIP LOCKED` lets several API
+instances share the work without publishing a row twice at the same time.
+
+**Rebuilding events.** `identity-event-registry.ts` maps a stable name to
+each event class. On the way out the event is created from the class
+**prototype**, not the constructor, so it keeps its **original `eventId`** and
+`instanceof` / `@EventsHandler` routing still work. An event missing from the
+registry fails the save, so it can't be forgotten silently.
+
+**Guarantee: at least once, not exactly once.** If the process dies after
+publishing but before the commit, the row is published again. So every
+consumer must be **idempotent**:
+
+| Consumer | Why a duplicate is harmless |
+|---|---|
+| `GrantAdminRoleOnApprovalHandler` | `grantAdminRole()` on an ADMIN does nothing |
+| `EndSessionsOnAdminRoleRevokedHandler` | `revoke()` on a revoked session does nothing |
+| `SessionEventsController` (SSE) | Takes the first `SessionRevoked` and closes |
+
+Handlers have nothing to do with the transaction: application handlers only
+load, call the domain, and save.
+
+**Replaying an event** (e.g. after a handler logged an error): the handlers are
+idempotent, so it is safe to run
+`UPDATE identity.outbox SET published_at = NULL WHERE id = '<eventId>'`.
+
+In Phase 5 only the relay's publish step changes (to RabbitMQ); the table,
+the transaction and the registry stay. Other contexts get their own
+`<context>.outbox` table, as `docs/REQUIREMENTS.md` §5.1 requires.
+
+---
+
+## 16. Housekeeping: deleting dead rows
+
+`IdentityHousekeeping` runs a minute after boot and then every
+`HOUSEKEEPING_INTERVAL_MINUTES` (default 6 h):
+
+| Table | Deleted when | Why keep them at all |
+|---|---|---|
+| `user_sessions` | dead (revoked, idle- or absolute-expired) for more than `SESSION_RETENTION_DAYS` (30) | "Where was I signed in last week?" support questions |
+| `verification_codes` | expired more than 7 days ago | Brief audit of code attempts |
+| `outbox` | published more than `OUTBOX_RETENTION_DAYS` (7) ago | Debugging recent events |
+
+- **One instance at a time:** each run takes `pg_try_advisory_xact_lock`; an
+  instance that doesn't get the lock skips that run.
+- **Idempotent:** a missed or doubled run is harmless.
+- `HOUSEKEEPING_INTERVAL_MINUTES=0` turns it off (tests).
+- Admin-access requests are never deleted: they are the audit trail of who
+  was given admin rights, by whom, and when.
+
+---
+
+## 17. Why this approach (design decisions)
+
+### 17.1 Cookies vs `localStorage` for tokens
 
 | | `localStorage` + `Authorization` header | **httpOnly cookie (chosen)** |
 |---|---|---|
@@ -518,7 +754,7 @@ can't read and close CSRF separately. (XSS can still *make requests* while the
 page is open. httpOnly stops *theft*, not *abuse in place*. CSP and output
 encoding are still needed.)
 
-### 14.2 Short JWT access + opaque rotating refresh vs alternatives
+### 17.2 Short JWT access + opaque rotating refresh vs alternatives
 
 | Option | Problem |
 |---|---|
@@ -527,7 +763,7 @@ encoding are still needed.)
 | Refresh token as a JWT too | Still needs a DB row to revoke/rotate, so the JWT format adds nothing but size and a bigger attack surface. |
 | **Short JWT + opaque refresh (chosen)** | Stateless fast path for 99% of requests; revocation via the refresh path. |
 
-### 14.3 Rotation + reuse detection vs a static refresh token
+### 17.3 Rotation + reuse detection vs a static refresh token
 
 A static refresh token, once stolen, works until it expires and the theft is
 **invisible**. Rotation makes every token single-use, so a stolen copy
@@ -535,14 +771,14 @@ A static refresh token, once stolen, works until it expires and the theft is
 detectable. This is the approach in the OAuth 2.0 Security Best Current Practice
 (RFC 9700 §4.14).
 
-### 14.4 One session (token family) per device vs one refresh token per user
+### 17.4 One session (token family) per device vs one refresh token per user
 
 With a single token per user, logging in on the phone would kill the laptop,
 and a reuse detection would log out *everything*. Per-session families give:
 independent devices, targeted revocation, a "where am I logged in" screen, and
 per-device logout.
 
-### 14.5 HMAC-SHA256 + pepper vs bcrypt/argon2 for refresh tokens
+### 17.5 HMAC-SHA256 + pepper vs bcrypt/argon2 for refresh tokens
 
 Passwords are low-entropy, so they need a **slow** hash (argon2id) to resist
 guessing. Refresh tokens have **256 bits of randomness**, and nobody can
@@ -550,25 +786,26 @@ brute-force that even with a fast hash. A slow hash would only make every
 refresh slower. HMAC with a pepper adds: a DB dump without the env secret
 can't even be used to *test* a candidate token.
 
-### 14.6 `<sessionId>.<secret>` format
+### 17.6 `<sessionId>.<secret>` format
 
 Lookup by primary key (O(1)) instead of searching by hash, and it enables
 reuse detection without a token-history table (§10).
 
-### 14.7 Optimistic locking vs `SELECT … FOR UPDATE`
+### 17.7 Optimistic locking vs `SELECT … FOR UPDATE`
 
 Contention on one session is rare (one device), so optimistic locking avoids
 holding row locks and keeps the repository simple. The conflict path is
 treated as a security event, not retried.
 
-### 14.8 Rules in the aggregate, not in handlers
+### 17.8 Rules in the aggregate, not in handlers
 
 "Mismatch → revoke", "never past absolute expiry", and "revoked stays revoked"
-are business rules, so they live in `AuthSession` and are unit-tested without
-a database (`auth-session.aggregate.spec.ts`). Handlers only load, call the
-domain, save, and publish.
+are business rules, so they live in `AuthSession` and can be unit-tested
+without a database. Handlers only load, call the domain, and save; the
+repository writes the aggregate's events to the outbox in the same
+transaction (§15).
 
-### 14.9 `SameSite=Lax` for access, `Strict` for refresh
+### 17.9 `SameSite=Lax` for access, `Strict` for refresh
 
 - `Lax` still sends the access cookie on top-level link navigation (e.g.
   clicking a link to the app from an email), but **not** on cross-site
@@ -579,7 +816,7 @@ domain, save, and publish.
 
 ---
 
-## 15. Vulnerabilities: threat model
+## 18. Vulnerabilities: threat model
 
 | # | Attack | How it works | Mitigation in this code | Residual risk |
 |---|---|---|---|---|
@@ -593,51 +830,59 @@ domain, save, and publish.
 | 8 | **Token for another app/audience** | Reuse a JWT from a sibling service | `iss` and `aud` pinned | — |
 | 9 | **Timing attack on hash compare** | Measure response time to learn the stored hash | `constantTimeEquals` | Network noise makes this impractical anyway. Defence in depth. |
 | 10 | **Account enumeration** | Different errors/timings for unknown email | Same error + dummy argon2 verify | Register still says "email already registered" (409). Common trade-off, so consider it. |
-| 11 | **Credential stuffing / brute force** | Many login attempts | argon2id makes each guess expensive | **No rate limiting yet** (§16). |
+| 11 | **Credential stuffing / brute force** | Many login attempts | argon2id makes each guess expensive; 6-digit codes allow 5 guesses each | **No rate limiting yet** (§19). |
 | 12 | **Session fixation** | Attacker sets a known session id before login | A new random session id and token on every login; server never accepts a client-chosen id | — |
 | 13 | **IDOR on sessions** | `DELETE /auth/sessions/<someone else's id>` | Ownership check, 404 for foreign ids | Every future context must do its own ownership checks. |
-| 14 | **Stale privileges** | Demoted admin keeps the ADMIN claim | Claims rebuilt from the DB on every refresh | Up to 15 min of stale role (§16). |
-| 15 | **Deleted user keeps access** | Account removed, tokens remain | Refresh revokes the session (`USER_GONE`) | Access token valid ≤ 15 min. |
+| 14 | **Stale privileges** | Demoted admin keeps the ADMIN claim | Demotion revokes every session (`ROLE_CHANGED`); the guard checks the session per request | — |
+| 15 | **Deleted user keeps access** | Account removed, tokens remain | Sessions are deleted with the user (FK cascade), so the guard rejects the token at once | — |
 | 16 | **Malformed-input attacks** | Huge or odd cookie values | Strict regex, max length 100, `null` on failure, no DB hit | — |
 | 17 | **Token in logs / caches** | Proxies or logs capture tokens | Tokens only in cookies; refresh cookie only on `/auth`; `Cache-Control: no-store` | Never log the `Cookie` header (configure pino redaction). |
 | 18 | **MITM / sniffing** | Read cookies on plain HTTP | `Secure` cookies (default on) | Needs HTTPS + HSTS in deployment. `COOKIE_SECURE=false` is for local dev only. |
 | 19 | **Force-logout CSRF** | Evil site hits `/auth/logout` | Refresh cookie `SameSite=Strict` isn't sent cross-site | — |
 | 20 | **Long-lived stolen session** | Attacker keeps refreshing forever | Absolute 30-day expiry | — |
+| 21 | **Privilege escalation to admin** | Sign up as admin, or send `role` in a body | `User.register` always makes USER (unknown body fields are a 400: `forbidNonWhitelisted`); ADMIN only via an approved request; SUPER_ADMIN only from the seed, at most one (unique index) | Whoever holds the super admin's password holds everything: give it a long password and keep it off shared machines. |
+| 22 | **Lost or half-applied events** | Crash between "save" and "publish" | Transactional outbox: the row and its events commit together; relay retries | In-process consumers: a handler failing after the event left the outbox isn't retried by the bus (§19). |
+| 23 | **Admin approves themselves** | An admin approves their own or a friend's request | Only `SUPER_ADMIN` can decide; admins and the super admin can't submit requests | — |
 
 ---
 
-## 16. Known gaps and residual risks
+## 19. Known gaps and residual risks
 
 These are known, deliberate deferrals, each with the fix that closes it.
 
-1. **Access token survives logout for up to 15 minutes.**
-   Fix (when Redis lands): on revoke, `SET denylist:sid:<sid> 1 EX <remaining access TTL>`;
-   `JwtAuthGuard` rejects tokens whose `sid` is denylisted. That's one Redis
-   `GET` per request, still no Postgres hit.
-2. **No rate limiting** on `/auth/login`, `/auth/refresh`, `/auth/register`.
-   Fix: `@nestjs/throttler` with Redis storage, per IP and per email, plus
+1. **No rate limiting** on `/auth/login`, `/auth/refresh`, `/auth/register`,
+   or the code endpoints. `@nestjs/throttler` is installed but not wired.
+   Fix: throttler with Redis storage, per IP and per email, plus
    lockout/backoff after N failures.
-3. **Concurrent tabs can trigger reuse detection.** Fix on the client (§17), or
+2. **Concurrent tabs can trigger reuse detection.** Fix on the client (§20), or
    add a small grace window server-side (weaker).
-4. **Expired/revoked session rows are never deleted.** Fix: a nightly job
-   deleting rows where `absolute_expires_at < now() - 30 days` (keep some
-   history for audit).
-5. **HS256 shared secret.** Fine in a monolith. In Phase 5, switch to **RS256**:
+3. **HS256 shared secret.** Fine in a monolith. In Phase 5, switch to **RS256**:
    identity holds the private key, other services get only the public key
    (via JWKS), so a compromised service can't mint tokens.
-6. **No password change / reset flow yet.** When added, it must call
-   logout-all (revoke every session) after changing the password.
-7. **Reuse-detected notification isn't sent yet.** The event is raised;
-   Notification needs a consumer.
-8. **Events are published after save, not via outbox.** If the process dies
-   between the two, the event is lost. The project's outbox (later phase)
-   fixes this.
-9. **`trust proxy` is not configured**, so behind a load balancer `req.ip` will
+4. **No emails for security events yet.** `RefreshTokenReuseDetected`,
+   `PasswordChanged`, `AdminAccessApproved/Rejected` are in the outbox, but
+   the Notification context that would email the user doesn't exist yet.
+5. **In-process event consumers.** The outbox guarantees an event reaches the
+   bus at least once, but @nestjs/cqrs doesn't redeliver if a *handler*
+   throws. Identity's two handlers retry 3 times, are idempotent, and log the
+   replay SQL if they still fail. With RabbitMQ (Phase 3/5) consumers ack
+   messages, and this gap closes.
+6. **Session events (SSE) are in-memory.** With several API instances, a
+   `session-revoked` raised on one instance doesn't reach a stream open on
+   another. Fix: publish through Redis pub/sub (or RabbitMQ) first.
+7. **`trust proxy` is not configured**, so behind a load balancer `req.ip` will
    be the proxy's IP. Set `app.set('trust proxy', 1)` in deployment.
+8. **The super admin can't be replaced through the API.** By design. To hand
+   over, change the account's email/password with the reset flow, or change
+   the database by hand (the unique index keeps it to one).
+
+Closed since the first version of this guide: the access token surviving
+logout (§7, §12.4), never-deleted session rows (§16), the missing password
+reset, and events lost between save and publish (§15).
 
 ---
 
-## 17. Frontend contract
+## 20. Frontend contract
 
 ```ts
 // RTK Query baseQuery wrapper: the essential logic
@@ -677,7 +922,7 @@ Rules:
 
 ---
 
-## 18. Configuration
+## 21. Configuration
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -690,13 +935,18 @@ Rules:
 | `SESSION_ABSOLUTE_TTL_SECONDS` | `2592000` (30d) | Must be ≥ idle |
 | `COOKIE_SECURE` | `true` unless set to `false` | `false` only for local `http://` |
 | `COOKIE_DOMAIN` | unset (host-only) | Set only if the frontend is on a sibling subdomain |
+| `OUTBOX_POLL_INTERVAL_MS` | `1000` | Relay safety-net poll; repositories also nudge it after each commit |
+| `HOUSEKEEPING_INTERVAL_MINUTES` | `360` | `0` disables the cleanup job |
+| `SESSION_RETENTION_DAYS` | `30` | Dead sessions kept this long, then deleted |
+| `OUTBOX_RETENTION_DAYS` | `7` | Published outbox rows kept this long |
+| `SUPER_ADMIN_EMAIL`, `SUPER_ADMIN_PASSWORD`, `SUPER_ADMIN_FULL_NAME`, `SUPER_ADMIN_PHONE` | — | Read only by `npm run seed:super-admin`. Password 12-72 chars. |
 
 ---
 
-## 19. Try it with curl
+## 22. Try it with curl
 
 ```bash
-API=http://localhost:3000
+API=http://localhost:4000
 JAR=$(mktemp)
 
 # login (stores both cookies in the jar)
@@ -724,6 +974,29 @@ curl -i -b $JAR -X POST $API/auth/refresh
 curl -i -b $JAR -c $JAR -X POST $API/auth/logout
 ```
 
+Admins by approval:
+
+```bash
+# 0. once per environment (idempotent)
+npm run seed:super-admin
+
+# 1. a verified USER asks
+curl -b $JAR -X POST $API/admin-access-requests \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"I manage the Koramangala screens"}'
+
+# 2. the super admin (its own cookie jar, $SA) sees the queue and approves
+curl -b $SA "$API/admin-access-requests?status=PENDING"
+curl -b $SA -X POST $API/admin-access-requests/<id>/approve \
+  -H 'Content-Type: application/json' -d '{"note":"Welcome"}'
+
+# 3. the user picks up the new role at the next refresh
+curl -b $JAR -c $JAR -X POST $API/auth/refresh
+
+# 4. demote: every session of that user ends at once
+curl -b $SA -X DELETE $API/admins/<userId>
+```
+
 To inspect the database:
 
 ```sql
@@ -731,11 +1004,17 @@ SELECT id, device_name, revoked_reason, last_used_at, idle_expires_at, version
   FROM identity.user_sessions
  WHERE user_id = '<uuid>'
  ORDER BY created_at DESC;
+
+-- events waiting to be published (should be empty within a second)
+SELECT id, event_type, occurred_at, attempts, last_error
+  FROM identity.outbox
+ WHERE published_at IS NULL
+ ORDER BY occurred_at;
 ```
 
 ---
 
-## 20. Code map
+## 23. Code map
 
 | Layer | File | Role |
 |---|---|---|
@@ -756,19 +1035,29 @@ SELECT id, device_name, revoked_reason, last_used_at, idle_expires_at, version
 | Presentation | `cookies/auth-cookies.ts` | The only place that knows cookie names and flags |
 | Presentation | `guards/jwt-auth.guard.ts`, `roles.guard.ts` | Authentication and role authorization |
 | Presentation | `controllers/auth.controller.ts` | Thin HTTP adapter |
+| Domain | `domain/user-role.enum.ts` | The three roles and `roleSatisfies()` (ranking) |
+| Domain | `domain/user.aggregate.ts` | `createSuperAdmin`, `grantAdminRole`, `revokeAdminRole` |
+| Domain | `domain/admin-access/admin-access-request.aggregate.ts` | Request state machine: submit, approve, reject, cancel |
+| Application | `commands/*-admin-access-request/`, `revoke-admin-role/`, `seed-super-admin/` | Admin use cases |
+| Application | `event-handlers/grant-admin-role-on-approval.handler.ts` | Approved → user becomes ADMIN (own transaction) |
+| Application | `event-handlers/end-sessions-on-admin-role-revoked.handler.ts` | Demoted → every session ends |
+| Application | `queries/list-admin-access-requests/`, `list-admins/` + `ports/admin-access-read-model.port.ts` | Admin screens (flat reads) |
+| Infrastructure | `outbox/outbox-writer.ts`, `outbox/identity-event-registry.ts` | Events → `identity.outbox` inside the caller's transaction |
+| Infrastructure | `outbox/outbox-relay.service.ts` | Outbox → event bus (`FOR UPDATE SKIP LOCKED`) |
+| Infrastructure | `housekeeping/identity-housekeeping.service.ts` | Deletes dead sessions, old codes, old outbox rows |
+| Presentation | `controllers/admin-access.controller.ts`, `admins.controller.ts` | Admin HTTP API |
+| Presentation | `cli/seed-super-admin.ts` | `npm run seed:super-admin` |
 | Wiring | `identity.module.ts` | JWT pinning, TTL config, port → adapter bindings |
 
 (Paths are relative to `src/identity/` unless they start with `shared/`.)
 
-Tests:
-`domain/session/auth-session.aggregate.spec.ts` (rotation, reuse, expiry,
-idempotent revoke) and
-`infrastructure/security/hmac-refresh-token-codec.adapter.spec.ts` (round-trip,
-pepper, session binding, malformed input).
+Tests: none at the moment. The domain specs were removed; the aggregates
+(`AuthSession`, `User`, `VerificationCode`, `AdminAccessRequest`) are pure
+TypeScript and the first place to add them back.
 
 ---
 
-## 21. Interview questions to practise
+## 24. Interview questions to practise
 
 Answer these out loud without looking at the doc.
 
@@ -789,3 +1078,8 @@ Answer these out loud without looking at the doc.
 15. What changes when you split into microservices (hint: RS256/JWKS, the edge verifies, services re-verify, events carry no tokens)?
 16. Idle vs absolute expiry: what does each defend against?
 17. Why do the session rules live in the aggregate rather than in the handler?
+18. Approving an admin changes two aggregates. Why two transactions and an event, not one transaction?
+19. What does the transactional outbox guarantee, and what does it *not* guarantee?
+20. Why must an outbox consumer be idempotent? Show it for `grantAdminRole`.
+21. Why is a promotion visible after the next refresh, but a demotion instant?
+22. How does the database stop a second super admin, and a second pending request?

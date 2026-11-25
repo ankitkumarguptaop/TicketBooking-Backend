@@ -5,11 +5,15 @@ import {
   Injectable,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { UserRole } from '../../domain/user-role.enum';
+import { roleSatisfies, UserRole } from '../../domain/user-role.enum';
 import { AuthenticatedUser } from '../decorators/current-user.decorator';
 import { ROLES_KEY } from '../decorators/roles.decorator';
 
-/** Must run after JwtAuthGuard. Routes without @Roles() are allowed. */
+/**
+ * Must run after JwtAuthGuard. Routes without @Roles() are allowed.
+ * Roles are ranked: @Roles(ADMIN) also lets SUPER_ADMIN in.
+ * With several roles listed, meeting any one of them is enough.
+ */
 @Injectable()
 export class RolesGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
@@ -24,7 +28,7 @@ export class RolesGuard implements CanActivate {
     const { user } = context
       .switchToHttp()
       .getRequest<{ user?: AuthenticatedUser }>();
-    if (!user || !required.includes(user.role)) {
+    if (!user || !required.some((role) => roleSatisfies(user.role, role))) {
       throw new ForbiddenException('Insufficient role');
     }
     return true;

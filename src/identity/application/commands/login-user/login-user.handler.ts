@@ -1,5 +1,5 @@
 import { Inject } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import { randomUUID } from 'node:crypto';
 import {
   EmailNotVerifiedError,
@@ -60,7 +60,6 @@ export class LoginUserHandler implements ICommandHandler<
     @Inject(REFRESH_TOKEN_CODEC)
     private readonly refreshTokens: RefreshTokenCodec,
     @Inject(SESSION_LIFETIME) private readonly lifetime: SessionLifetime,
-    private readonly eventBus: EventBus,
   ) {}
 
   async execute(command: LoginUserCommand): Promise<LoginResult> {
@@ -96,7 +95,6 @@ export class LoginUserHandler implements ICommandHandler<
     });
 
     await this.sessions.save(session);
-    this.eventBus.publishAll(session.pullDomainEvents());
 
     const access = await this.accessTokens.issue({
       sub: user.id,

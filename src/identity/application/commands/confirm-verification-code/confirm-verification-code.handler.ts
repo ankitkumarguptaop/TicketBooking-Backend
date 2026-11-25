@@ -1,5 +1,5 @@
 import { Inject } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import {
   NoVerificationCodeError,
   UserNotFoundError,
@@ -29,7 +29,6 @@ export class ConfirmVerificationCodeHandler implements ICommandHandler<
     @Inject(VERIFICATION_CODE_REPOSITORY)
     private readonly codes: VerificationCodeRepository,
     @Inject(OTP_CODEC) private readonly otp: OtpCodec,
-    private readonly eventBus: EventBus,
   ) {}
 
   async execute(
@@ -62,7 +61,6 @@ export class ConfirmVerificationCodeHandler implements ICommandHandler<
     // a new code. Rare, harmless, and simpler than a transaction or a saga.
     user.markVerified(channel, now);
     await this.users.save(user);
-    this.eventBus.publishAll(user.pullDomainEvents());
 
     return toUserProfileView(user);
   }

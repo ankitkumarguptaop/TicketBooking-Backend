@@ -30,7 +30,12 @@ async function bootstrap() {
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Ticket Booking API')
     .setVersion('0.1.0')
-    .addCookieAuth('access_token')
+    // 3rd argument = the scheme NAME that @ApiCookieAuth('access_token') refers to
+    .addCookieAuth(
+      'access_token',
+      { type: 'apiKey', in: 'cookie' },
+      'access_token',
+    )
     .addBearerAuth()
     .build();
   SwaggerModule.setup(

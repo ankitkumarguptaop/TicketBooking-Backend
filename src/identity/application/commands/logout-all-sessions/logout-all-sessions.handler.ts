@@ -1,5 +1,5 @@
 import { Inject } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import {
   AUTH_SESSION_REPOSITORY,
   AuthSessionRepository,
@@ -16,7 +16,6 @@ export class LogoutAllSessionsHandler implements ICommandHandler<
   constructor(
     @Inject(AUTH_SESSION_REPOSITORY)
     private readonly sessions: AuthSessionRepository,
-    private readonly eventBus: EventBus,
   ) {}
 
   async execute(
@@ -29,7 +28,6 @@ export class LogoutAllSessionsHandler implements ICommandHandler<
     for (const session of active) {
       session.revoke(SessionRevocationReason.LOGOUT_ALL, now);
       await this.sessions.save(session);
-      this.eventBus.publishAll(session.pullDomainEvents());
     }
     return { revoked: active.length };
   }

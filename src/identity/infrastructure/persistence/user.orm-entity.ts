@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   PrimaryColumn,
   Unique,
 } from 'typeorm';
@@ -11,6 +12,12 @@ import { UserRole } from '../../domain/user-role.enum';
 @Entity({ schema: 'identity', name: 'users' })
 /** Last guard for "email is unique", even under concurrent signups. */
 @Unique('uq_users_email', ['email'])
+/**
+ * At most one SUPER_ADMIN. An expression index ((true)) WHERE role =
+ * 'SUPER_ADMIN', which TypeORM can't describe, so it lives only in
+ * migration 7 and `synchronize: false` stops migration:generate dropping it.
+ */
+@Index('uq_users_single_super_admin', { synchronize: false })
 export class UserOrmEntity {
   @PrimaryColumn('uuid', { primaryKeyConstraintName: 'pk_users' })
   id!: string;

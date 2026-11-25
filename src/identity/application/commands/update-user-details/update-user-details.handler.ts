@@ -1,5 +1,5 @@
 import { Inject } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import { UserNotFoundError } from '../../../domain/errors/identity.errors';
 import {
   USER_REPOSITORY,
@@ -11,7 +11,7 @@ import {
 } from '../../queries/get-user-profile/user-profile.view';
 import { UpdateUserDetailsCommand } from './update-user-details.command';
 
-/** Load → change through the aggregate → save → publish. No rules here. */
+/** Load → change through the aggregate → save (events go out via the outbox). No rules here. */
 @CommandHandler(UpdateUserDetailsCommand)
 export class UpdateUserDetailsHandler implements ICommandHandler<
   UpdateUserDetailsCommand,
@@ -19,7 +19,6 @@ export class UpdateUserDetailsHandler implements ICommandHandler<
 > {
   constructor(
     @Inject(USER_REPOSITORY) private readonly users: UserRepository,
-    private readonly eventBus: EventBus,
   ) {}
 
   async execute(command: UpdateUserDetailsCommand): Promise<UserProfileView> {
@@ -29,7 +28,6 @@ export class UpdateUserDetailsHandler implements ICommandHandler<
     user.updateDetails({ fullName: command.fullName, phone: command.phone });
 
     await this.users.save(user);
-    this.eventBus.publishAll(user.pullDomainEvents());
 
     // Returning the new state saves the client a GET /users/me round trip.
     return toUserProfileView(user);

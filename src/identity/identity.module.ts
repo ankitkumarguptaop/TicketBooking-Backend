@@ -3,6 +3,26 @@ import { ConfigService } from '@nestjs/config';
 import { CqrsModule } from '@nestjs/cqrs';
 import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ApproveAdminAccessRequestHandler } from './application/commands/approve-admin-access-request/approve-admin-access-request.handler';
+import { CancelAdminAccessRequestHandler } from './application/commands/cancel-admin-access-request/cancel-admin-access-request.handler';
+import { RejectAdminAccessRequestHandler } from './application/commands/reject-admin-access-request/reject-admin-access-request.handler';
+import { RevokeAdminRoleHandler } from './application/commands/revoke-admin-role/revoke-admin-role.handler';
+import { SeedSuperAdminHandler } from './application/commands/seed-super-admin/seed-super-admin.handler';
+import { SubmitAdminAccessRequestHandler } from './application/commands/submit-admin-access-request/submit-admin-access-request.handler';
+import { EndSessionsOnAdminRoleRevokedHandler } from './application/event-handlers/end-sessions-on-admin-role-revoked.handler';
+import { GrantAdminRoleOnApprovalHandler } from './application/event-handlers/grant-admin-role-on-approval.handler';
+import { ADMIN_ACCESS_READ_MODEL } from './application/ports/admin-access-read-model.port';
+import { ListAdminAccessRequestsHandler } from './application/queries/list-admin-access-requests/list-admin-access-requests.handler';
+import { ListAdminsHandler } from './application/queries/list-admins/list-admins.handler';
+import { ADMIN_ACCESS_REQUEST_REPOSITORY } from './domain/admin-access/admin-access-request.repository';
+import { IdentityHousekeeping } from './infrastructure/housekeeping/identity-housekeeping.service';
+import { OutboxRelay } from './infrastructure/outbox/outbox-relay.service';
+import { AdminAccessRequestOrmEntity } from './infrastructure/persistence/admin-access-request.orm-entity';
+import { OutboxMessageOrmEntity } from './infrastructure/persistence/outbox-message.orm-entity';
+import { TypeOrmAdminAccessReadModel } from './infrastructure/persistence/typeorm-admin-access.read-model';
+import { TypeOrmAdminAccessRequestRepository } from './infrastructure/persistence/typeorm-admin-access-request.repository';
+import { AdminAccessController } from './presentation/controllers/admin-access.controller';
+import { AdminsController } from './presentation/controllers/admins.controller';
 import { ConfirmVerificationCodeHandler } from './application/commands/confirm-verification-code/confirm-verification-code.handler';
 import { LoginUserHandler } from './application/commands/login-user/login-user.handler';
 import { LogoutAllSessionsHandler } from './application/commands/logout-all-sessions/logout-all-sessions.handler';
@@ -62,6 +82,8 @@ const JWT_ALGORITHM = 'HS256';
       UserOrmEntity,
       AuthSessionOrmEntity,
       VerificationCodeOrmEntity,
+      AdminAccessRequestOrmEntity,
+      OutboxMessageOrmEntity,
     ]),
     JwtModule.registerAsync({
       inject: [ConfigService],
@@ -99,6 +121,8 @@ const JWT_ALGORITHM = 'HS256';
     RegistrationVerificationController,
     PasswordResetController,
     ChangePasswordController,
+    AdminAccessController,
+    AdminsController,
   ],
   providers: [
     // use cases
@@ -115,6 +139,17 @@ const JWT_ALGORITHM = 'HS256';
     ResetPasswordHandler,
     GetUserProfileHandler,
     ListMySessionsHandler,
+    SubmitAdminAccessRequestHandler,
+    ApproveAdminAccessRequestHandler,
+    RejectAdminAccessRequestHandler,
+    CancelAdminAccessRequestHandler,
+    RevokeAdminRoleHandler,
+    SeedSuperAdminHandler,
+    ListAdminAccessRequestsHandler,
+    ListAdminsHandler,
+    // reactions to identity's own events (delivered via the outbox)
+    GrantAdminRoleOnApprovalHandler,
+    EndSessionsOnAdminRoleRevokedHandler,
     // config
     {
       provide: SESSION_LIFETIME,
@@ -147,9 +182,17 @@ const JWT_ALGORITHM = 'HS256';
       provide: VERIFICATION_TOKEN_SERVICE,
       useClass: JwtVerificationTokenService,
     },
+    {
+      provide: ADMIN_ACCESS_REQUEST_REPOSITORY,
+      useClass: TypeOrmAdminAccessRequestRepository,
+    },
+    { provide: ADMIN_ACCESS_READ_MODEL, useClass: TypeOrmAdminAccessReadModel },
     { provide: EMAIL_SENDER, useClass: NodemailerEmailSender },
     // Dev only (refuses to start in production): swap for a real SMS provider.
     { provide: SMS_SENDER, useClass: LogSmsSender },
+    // background work: outbox -> event bus, and deleting dead rows
+    OutboxRelay,
+    IdentityHousekeeping,
     // presentation helpers
     AuthCookies,
     // guards, reused by other contexts for protected / admin routes

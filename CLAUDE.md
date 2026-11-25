@@ -74,7 +74,7 @@ Dependencies point inward only: presentation/infrastructure → application → 
 - Create aggregates through factories (`Booking.create(...)`) so invalid state can't exist.
 - Value objects are immutable (`Money`, `SeatRef`, `TimeSlot`, `HoldWindow`).
 - Repository interface lives in `domain/`; TypeORM implementation in `infrastructure/persistence/`.
-- Application handlers: load → call domain → save → publish events. No business rules in handlers.
+- Application handlers: load → call domain → save. The repository writes the aggregate's events to the context's outbox in the same transaction; a relay publishes them (ADR 005). No business rules in handlers.
 - Light CQRS via `@nestjs/cqrs`: commands mutate aggregates; queries read flat rows directly.
 - Domain errors are mapped to HTTP status codes in **one** exception filter.
 - Pass `now: Date` into domain methods instead of calling `new Date()` inside the domain (testability).
@@ -92,7 +92,7 @@ Use **Show, Screen, Seat, ShowSeat, SeatHold, Booking, Payment, Refund**. Never 
 - Consumers are idempotent (`processed_events`); create-booking/create-payment honour `Idempotency-Key`.
 
 ## Tech stack
-PostgreSQL (one DB, schema per context) + TypeORM · Redis (holds, cache, rate limit) · rabbitmq (hold expiry, reminders, email retry) · Socket.IO + Redis adapter (live seat map) · Stripe test mode behind a `PaymentGateway` port · JWT access + rotating httpOnly refresh token, roles `USER`/`ADMIN` · pino logs with correlation id · Jest + Testcontainers + k6.
+PostgreSQL (one DB, schema per context) + TypeORM · Redis (holds, cache, rate limit) · rabbitmq (hold expiry, reminders, email retry) · Socket.IO + Redis adapter (live seat map) · Stripe test mode behind a `PaymentGateway` port · JWT access + rotating httpOnly refresh token, roles `USER` < `ADMIN` < `SUPER_ADMIN` (one seeded super admin approves admins, ADR 006) · pino logs with correlation id · Jest + Testcontainers + k6.
 
 ## Coding conventions
 - TypeScript strict; no `any` in domain code.

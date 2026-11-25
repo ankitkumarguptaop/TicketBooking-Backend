@@ -1,5 +1,5 @@
 import { Inject } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import { SessionNotFoundError } from '../../../domain/errors/identity.errors';
 import {
   AUTH_SESSION_REPOSITORY,
@@ -17,7 +17,6 @@ export class RevokeSessionHandler implements ICommandHandler<
   constructor(
     @Inject(AUTH_SESSION_REPOSITORY)
     private readonly sessions: AuthSessionRepository,
-    private readonly eventBus: EventBus,
   ) {}
 
   async execute(command: RevokeSessionCommand): Promise<void> {
@@ -30,6 +29,5 @@ export class RevokeSessionHandler implements ICommandHandler<
 
     session.revoke(SessionRevocationReason.REVOKED_BY_USER, new Date());
     await this.sessions.save(session);
-    this.eventBus.publishAll(session.pullDomainEvents());
   }
 }

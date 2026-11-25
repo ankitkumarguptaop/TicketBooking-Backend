@@ -196,3 +196,87 @@ export class EmailNotVerifiedError extends DomainError {
     super("Your email isn't verified. Complete your registration to sign in");
   }
 }
+
+/* ---------------------------- admin access ---------------------------- */
+
+export class InvalidAdminAccessReasonError extends DomainError {
+  readonly code = 'IDENTITY_INVALID_ADMIN_ACCESS_REASON';
+  readonly kind = 'VALIDATION';
+  constructor(min: number, max: number) {
+    super(`Reason must be between ${min} and ${max} characters`);
+  }
+}
+
+export class InvalidDecisionNoteError extends DomainError {
+  readonly code = 'IDENTITY_INVALID_DECISION_NOTE';
+  readonly kind = 'VALIDATION';
+  constructor(max: number) {
+    super(`Note must be at most ${max} characters`);
+  }
+}
+
+/** Only a verified USER may ask; admins and the super admin can't. */
+export class NotEligibleForAdminAccessError extends DomainError {
+  readonly code = 'IDENTITY_NOT_ELIGIBLE_FOR_ADMIN_ACCESS';
+  readonly kind = 'FORBIDDEN';
+  constructor(why: 'ALREADY_ADMIN' | 'EMAIL_NOT_VERIFIED') {
+    super(
+      why === 'ALREADY_ADMIN'
+        ? 'You already have admin rights'
+        : 'Verify your email before requesting admin access',
+    );
+  }
+}
+
+/** One open request per user at a time. */
+export class AdminAccessRequestAlreadyPendingError extends DomainError {
+  readonly code = 'IDENTITY_ADMIN_ACCESS_ALREADY_PENDING';
+  readonly kind = 'CONFLICT';
+  constructor() {
+    super('You already have a pending admin access request');
+  }
+}
+
+/** Unknown request, or someone else's (same answer on purpose). */
+export class AdminAccessRequestNotFoundError extends DomainError {
+  readonly code = 'IDENTITY_ADMIN_ACCESS_REQUEST_NOT_FOUND';
+  readonly kind = 'NOT_FOUND';
+  constructor(requestId: string) {
+    super(`Admin access request ${requestId} not found`);
+  }
+}
+
+/** Approve/reject/cancel on a request that was already decided. */
+export class AdminAccessRequestNotPendingError extends DomainError {
+  readonly code = 'IDENTITY_ADMIN_ACCESS_REQUEST_NOT_PENDING';
+  readonly kind = 'CONFLICT';
+  constructor(status: string) {
+    super(`This request is already ${status.toLowerCase()}`);
+  }
+}
+
+/** Two super-admin tabs decided the same request at once (optimistic lock lost). */
+export class ConcurrentAdminAccessUpdateError extends DomainError {
+  readonly code = 'IDENTITY_CONCURRENT_ADMIN_ACCESS_UPDATE';
+  readonly kind = 'CONFLICT';
+  constructor() {
+    super('This request was changed by someone else. Reload and try again');
+  }
+}
+
+/** The super admin's role is fixed: it comes from the seed, never from the API. */
+export class SuperAdminRoleImmutableError extends DomainError {
+  readonly code = 'IDENTITY_SUPER_ADMIN_ROLE_IMMUTABLE';
+  readonly kind = 'FORBIDDEN';
+  constructor() {
+    super("The super admin's role can't be changed");
+  }
+}
+
+export class UserIsNotAdminError extends DomainError {
+  readonly code = 'IDENTITY_USER_IS_NOT_ADMIN';
+  readonly kind = 'INVALID_STATE';
+  constructor(userId: string) {
+    super(`User ${userId} is not an admin`);
+  }
+}

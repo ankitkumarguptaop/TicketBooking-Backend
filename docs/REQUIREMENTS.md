@@ -25,7 +25,7 @@ Build one flow deeply — **hold seats → pay → confirm → notify** — as a
 
 | # | Feature | Notes |
 |---|---------|-------|
-| F1 | Authentication | Signup, login, short-lived JWT access token, rotating refresh token in httpOnly cookie, roles `USER` / `ADMIN` |
+| F1 | Authentication | Signup, login, short-lived JWT access token, rotating refresh token in httpOnly cookie, roles `USER` / `ADMIN` / `SUPER_ADMIN` (admins by super-admin approval) |
 | F2 | Movies (catalog) | Admin CRUD. A movie needs runtime, language, certificate before it can be scheduled |
 | F3 | Theatres & screens | Admin CRUD; a screen owns its seat layout |
 | F4 | Seat layouts | Seat numbers unique per screen; layout with future shows cannot be deleted; seat categories |

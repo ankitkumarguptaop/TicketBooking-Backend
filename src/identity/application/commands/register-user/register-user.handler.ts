@@ -1,5 +1,5 @@
 import { Inject } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import { randomUUID } from 'node:crypto';
 import { EmailAlreadyRegisteredError } from '../../../domain/errors/identity.errors';
 import { User } from '../../../domain/user.aggregate';
@@ -22,7 +22,6 @@ export class RegisterUserHandler implements ICommandHandler<
   constructor(
     @Inject(USER_REPOSITORY) private readonly users: UserRepository,
     @Inject(PASSWORD_HASHER) private readonly hasher: PasswordHasher,
-    private readonly eventBus: EventBus,
   ) {}
 
   async execute(command: RegisterUserCommand): Promise<{ userId: string }> {
@@ -42,7 +41,6 @@ export class RegisterUserHandler implements ICommandHandler<
     });
 
     await this.users.save(user);
-    this.eventBus.publishAll(user.pullDomainEvents());
 
     return { userId: user.id };
   }

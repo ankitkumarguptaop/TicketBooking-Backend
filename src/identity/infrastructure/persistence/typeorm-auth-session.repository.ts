@@ -6,12 +6,15 @@ import { AuthSession } from '../../domain/session/auth-session.aggregate';
 import { AuthSessionRepository } from '../../domain/session/auth-session.repository';
 import { AuthSessionMapper } from './auth-session.mapper';
 import { AuthSessionOrmEntity } from './auth-session.orm-entity';
+import { appendToOutbox } from '../outbox/outbox-writer';
+import { OutboxRelay } from '../outbox/outbox-relay.service';
 
 @Injectable()
 export class TypeOrmAuthSessionRepository implements AuthSessionRepository {
   constructor(
     @InjectRepository(AuthSessionOrmEntity)
     private readonly orm: Repository<AuthSessionOrmEntity>,
+    private readonly outbox: OutboxRelay,
   ) {}
 
   async findById(id: string): Promise<AuthSession | null> {
@@ -35,25 +38,30 @@ export class TypeOrmAuthSessionRepository implements AuthSessionRepository {
   async save(session: AuthSession): Promise<void> {
     const changed = AuthSessionMapper.toChangedColumns(session);
 
-    if (session.version === 0) {
-      await this.orm.insert({
-        id: session.id,
-        userId: session.userId,
-        createdAt: session.createdAt,
-        version: 1,
-        ...changed,
-      });
-      return;
-    }
-
-    // Compare-and-swap: only succeeds if nobody saved since we loaded it.
-    // UPDATE ... SET ..., version = version + 1 WHERE id = $1 AND version = $2
-    const result = await this.orm.update(
-      { id: session.id, version: session.version },
-      { ...changed, version: session.version + 1 },
-    );
-    if (result.affected !== 1) {
-      throw new ConcurrentSessionUpdateError(session.id);
-    }
+    // The row and its events commit together (transactional outbox).
+    await this.orm.manager.transaction(async (manager) => {
+      if (session.version === 0) {
+        await manager.insert(AuthSessionOrmEntity, {
+          id: session.id,
+          userId: session.userId,
+          createdAt: session.createdAt,
+          version: 1,
+          ...changed,
+        });
+      } else {
+        // Compare-and-swap: only succeeds if nobody saved since we loaded it.
+        // UPDATE ... SET ..., version = version + 1 WHERE id = $1 AND version = $2
+        const result = await manager.update(
+          AuthSessionOrmEntity,
+          { id: session.id, version: session.version },
+          { ...changed, version: session.version + 1 },
+        );
+        if (result.affected !== 1) {
+          throw new ConcurrentSessionUpdateError(session.id);
+        }
+      }
+      await appendToOutbox(manager, session.pullDomainEvents());
+    });
+    this.outbox.nudge();
   }
 }

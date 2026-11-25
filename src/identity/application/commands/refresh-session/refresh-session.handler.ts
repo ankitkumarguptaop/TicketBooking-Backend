@@ -1,5 +1,5 @@
 import { Inject } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import {
   ConcurrentSessionUpdateError,
   InvalidRefreshTokenError,
@@ -47,7 +47,6 @@ export class RefreshSessionHandler implements ICommandHandler<
     @Inject(REFRESH_TOKEN_CODEC)
     private readonly refreshTokens: RefreshTokenCodec,
     @Inject(SESSION_LIFETIME) private readonly lifetime: SessionLifetime,
-    private readonly eventBus: EventBus,
   ) {}
 
   async execute(command: RefreshSessionCommand): Promise<AuthTokens> {
@@ -112,9 +111,9 @@ export class RefreshSessionHandler implements ICommandHandler<
     };
   }
 
+  /** Save = row + events in one transaction (outbox). */
   private async persist(session: AuthSession): Promise<void> {
     await this.sessions.save(session);
-    this.eventBus.publishAll(session.pullDomainEvents());
   }
 
   private async revokeForRace(sessionId: string, now: Date): Promise<void> {

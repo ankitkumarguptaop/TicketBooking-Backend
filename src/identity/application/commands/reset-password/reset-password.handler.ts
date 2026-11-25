@@ -1,5 +1,5 @@
 import { Inject } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import { NoVerificationCodeError } from '../../../domain/errors/identity.errors';
 import {
   AUTH_SESSION_REPOSITORY,
@@ -44,7 +44,6 @@ export class ResetPasswordHandler implements ICommandHandler<
     private readonly sessions: AuthSessionRepository,
     @Inject(OTP_CODEC) private readonly otp: OtpCodec,
     @Inject(PASSWORD_HASHER) private readonly hasher: PasswordHasher,
-    private readonly eventBus: EventBus,
   ) {}
 
   async execute(command: ResetPasswordCommand): Promise<void> {
@@ -67,7 +66,6 @@ export class ResetPasswordHandler implements ICommandHandler<
 
     user.resetPassword(await this.hasher.hash(command.newPassword), now);
     await this.users.save(user);
-    this.eventBus.publishAll(user.pullDomainEvents());
 
     // Separate aggregates, saved one by one (as in "log out everywhere").
     for (const session of await this.sessions.findActiveByUserId(
@@ -77,7 +75,6 @@ export class ResetPasswordHandler implements ICommandHandler<
       if (session.id === command.keepSessionId) continue;
       session.revoke(SessionRevocationReason.PASSWORD_RESET, now);
       await this.sessions.save(session);
-      this.eventBus.publishAll(session.pullDomainEvents());
     }
   }
 }

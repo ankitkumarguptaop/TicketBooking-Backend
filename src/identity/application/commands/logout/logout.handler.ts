@@ -1,5 +1,5 @@
 import { Inject } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import {
   AUTH_SESSION_REPOSITORY,
   AuthSessionRepository,
@@ -21,7 +21,6 @@ export class LogoutHandler implements ICommandHandler<LogoutCommand, void> {
     private readonly sessions: AuthSessionRepository,
     @Inject(REFRESH_TOKEN_CODEC)
     private readonly refreshTokens: RefreshTokenCodec,
-    private readonly eventBus: EventBus,
   ) {}
 
   async execute(command: LogoutCommand): Promise<void> {
@@ -33,6 +32,5 @@ export class LogoutHandler implements ICommandHandler<LogoutCommand, void> {
 
     session.logout(presented.hash, new Date());
     await this.sessions.save(session);
-    this.eventBus.publishAll(session.pullDomainEvents());
   }
 }

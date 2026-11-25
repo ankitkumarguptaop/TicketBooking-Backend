@@ -11,4 +11,6 @@ export enum SessionRevocationReason {
   PASSWORD_RESET = 'PASSWORD_RESET',
   /** The user behind the session no longer exists. */
   USER_GONE = 'USER_GONE',
+  /** The user lost a role: old tokens must not keep its rights. */
+  ROLE_CHANGED = 'ROLE_CHANGED',
 }

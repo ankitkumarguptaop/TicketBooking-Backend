@@ -1,0 +1,1509 @@
+openapi: '3.0.3'
+
+info:
+  title: Ticket Booking API
+  version: 0.1.0
+  description: |
+    Backend for a movie ticket booking platform. This version covers the
+    **identity** bounded context: accounts, sign-in, sessions, contact
+    verification, passwords, and roles (admins by super-admin approval). Catalog, scheduling, booking and payment
+    endpoints arrive in later phases (see `docs/REQUIREMENTS.md`).
+
+    ---
+
+    ## Authentication model
+
+    | Credential | Where it lives | Lifetime | Sent to |
+    |---|---|---|---|
+    | `access_token` (JWT, HS256) | httpOnly cookie (SameSite=Lax, path `/`) **or** `Authorization: Bearer` | 15 min | every protected route |
+    | `refresh_token` (opaque, single use) | httpOnly cookie (SameSite=Strict, path `/auth`) | 7 days idle / 30 days absolute (defaults) | `/auth/*` only |
+    | `verification_token` (JWT) | httpOnly cookie (SameSite=Strict, path `/auth/verification`) | 30 min | `/auth/verification/*` only |
+
+    * **Tokens never appear in response bodies.** Browsers receive them as
+      cookies; bodies carry display data and `accessTokenExpiresAt` only.
+    * Browser clients must send requests with credentials
+      (`fetch(url, { credentials: 'include' })`).
+    * Every protected request also checks the session in the database, so a
+      sign-out from another device takes effect immediately, not when the JWT expires.
+
+    ---
+
+    ## Use cases
+
+    ### UC-1 Sign up
+    1. `POST /auth/register` creates the account and sets `verification_token`. **No session yet.**
+    2. `POST /auth/verification/email/send` emails a 6-digit code.
+    3. `POST /auth/verification/email/confirm` marks the email verified.
+    4. *(optional)* the same two calls with `phone` send and check an SMS code.
+    5. `POST /auth/login`. Sign-in is refused until the email is verified.
+
+    `GET /auth/verification/status` drives the verification screen at any point.
+
+    ### UC-2 Sign in
+    `POST /auth/login` starts **one session per device** and sets both auth
+    cookies. Right password + unverified email → `403 IDENTITY_EMAIL_NOT_VERIFIED`
+    **and** a fresh `verification_token` cookie: continue at UC-1 step 2.
+
+    ### UC-3 Stay signed in (silent refresh)
+    1. A call fails with `401 AUTH_TOKEN_EXPIRED`.
+    2. Call `POST /auth/refresh` **once**; it rotates the refresh token and sets new cookies.
+    3. Retry the original call.
+
+    If refresh fails, cookies are cleared: show the sign-in screen. Replaying an
+    already-used refresh token revokes the session (theft detection), so never
+    run two refreshes in parallel.
+
+    ### UC-4 Sign out
+    * This device: `POST /auth/logout` (always 204).
+    * Every device: `POST /auth/logout-all`.
+    * One specific device: `GET /auth/sessions` then `DELETE /auth/sessions/{id}`.
+    * Live: keep `GET /auth/sessions/events` (Server-Sent Events) open; it emits
+      `session-revoked` the moment this session ends.
+
+    ### UC-5 Forgot password (signed out)
+    1. `POST /auth/password-reset/request` emails a code. Always 200, even for
+       unknown emails, so it cannot reveal who has an account.
+    2. `POST /auth/password-reset/confirm` with email + code + new password.
+       **Every** session is signed out.
+
+    ### UC-6 Change password (signed in)
+    1. `POST /users/me/password/code` emails a code to the account's address.
+    2. `POST /users/me/password` with code + new password. Every **other**
+       session is signed out; the current one stays.
+
+    ### UC-7 Manage profile
+    * `GET /users/me`, `PATCH /users/me` (name, phone).
+    * A changed phone becomes unverified; re-verify with
+      `POST /users/me/verification/phone/send` and `.../confirm`.
+
+    ### UC-8 Become an admin (approval by the super admin)
+    Roles are ranked `USER < ADMIN < SUPER_ADMIN`; a route that needs `ADMIN`
+    also admits `SUPER_ADMIN`. Nobody signs up as an admin. The single
+    `SUPER_ADMIN` is created by `npm run seed:super-admin`, never by the API.
+    1. A verified `USER` calls `POST /admin-access-requests` with a reason.
+    2. The super admin reviews `GET /admin-access-requests?status=PENDING` and
+       calls `.../{id}/approve` or `.../{id}/reject`, optionally with a note.
+    3. On approval the user becomes `ADMIN` within a second (asynchronously).
+       The **current** access token still says `USER`: call
+       `POST /auth/refresh` to get a token with the new role.
+    4. The requester follows progress with `GET /admin-access-requests/mine`
+       and may withdraw a pending request with `.../{id}/cancel`.
+
+    The super admin removes an admin with `DELETE /admins/{userId}`. All of that
+    person's sessions end **immediately** (`session-revoked` with reason
+    `ROLE_CHANGED`); they can sign in again as a `USER`.
+
+    ---
+
+    ## Verification code rules
+    6 digits · valid **10 minutes** · **5 attempts** · resend allowed after
+    **60 seconds** · single use · a new code replaces the previous one. Codes
+    are stored only as HMACs.
+
+    ---
+
+    ## Errors
+
+    Every error has the same shape:
+
+    ```json
+    { "statusCode": 401, "code": "AUTH_TOKEN_EXPIRED", "message": "Access token expired" }
+    ```
+
+    * **Branch on `code`**, never on `message` (text may change).
+    * `message` is safe to display.
+    * Request-validation errors (400) have **no `code`**, and `message` is an
+      array with one entry per broken rule.
+
+    | Status | Meaning |
+    |---|---|
+    | 400 | Invalid input (validation, wrong code) |
+    | 401 | Not signed in, or token/session invalid or expired |
+    | 403 | Signed in but not allowed (email not verified, role too low) |
+    | 404 | Not found, or not yours |
+    | 409 | Conflicts with current state (email taken, already verified, concurrent update) |
+    | 422 | Not possible in the current state (no code requested yet, user is not an admin) |
+    | 429 | Too soon or too many attempts |
+
+servers:
+  - url: http://localhost:4000
+    description: Local development
+
+tags:
+  - name: Registration
+    description: Create an account and verify its email (and optionally phone) before the first sign-in. (UC-1)
+  - name: Authentication
+    description: Sign in, refresh-token rotation, sign out. (UC-2, UC-3, UC-4)
+  - name: Sessions
+    description: One session per signed-in device. List, end one, get told live when this one ends. (UC-4)
+  - name: Password
+    description: Forgot password (signed out) and change password (signed in). (UC-5, UC-6)
+  - name: Profile
+    description: The signed-in user's own account. (UC-7)
+  - name: Admin access
+    description: Ask to become an admin, and the super admin's approval queue. (UC-8)
+  - name: Admins
+    description: Super admin only. Who has admin rights, and removing them. (UC-8)
+
+paths:
+  # ───────────────────────────── Registration ─────────────────────────────
+  /auth/register:
+    post:
+      tags: [Registration]
+      operationId: register
+      summary: Create an account
+      description: |
+        **UC-1 step 1.** Creates a `USER` account with unverified email and phone.
+
+        No session is started. A `verification_token` cookie (30 min) lets this
+        browser call `/auth/verification/*` to verify the email, which is
+        required before the first sign-in.
+
+        The email is trimmed and lower-cased. Spaces, dashes and brackets are
+        stripped from the phone.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterUserRequest' }
+      responses:
+        '201':
+          description: Account created. Next, send the email code.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/SetVerificationCookie' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisterUserResponse' }
+        '400':
+          description: Invalid input.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                VALIDATION_FAILED: { $ref: '#/components/examples/RegisterValidation' }
+                IDENTITY_INVALID_FULL_NAME: { $ref: '#/components/examples/InvalidFullName' }
+                IDENTITY_INVALID_PHONE: { $ref: '#/components/examples/InvalidPhone' }
+        '409':
+          description: Email already registered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                IDENTITY_EMAIL_ALREADY_REGISTERED: { $ref: '#/components/examples/EmailAlreadyRegistered' }
+
+  /auth/verification/status:
+    get:
+      tags: [Registration]
+      operationId: getVerificationStatus
+      summary: Sign-up verification status
+      description: |
+        **UC-1.** What the verification screen shows: the contacts being
+        verified and which are done.
+      security:
+        - verificationCookie: []
+      responses:
+        '200':
+          description: Current status.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VerificationStatus' }
+        '401': { $ref: '#/components/responses/VerificationExpired' }
+        '404': { $ref: '#/components/responses/UserNotFound' }
+
+  /auth/verification/{channel}/send:
+    post:
+      tags: [Registration]
+      operationId: sendSignupVerificationCode
+      summary: Send a sign-up verification code
+      description: |
+        **UC-1 step 2.** Sends a new 6-digit code by email or SMS (see
+        *Verification code rules*). A new code replaces the previous one.
+      security:
+        - verificationCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Channel'
+      responses:
+        '200':
+          description: Code sent. `sentTo` is masked for display.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VerificationCodeSent' }
+        '400': { $ref: '#/components/responses/InvalidChannel' }
+        '401': { $ref: '#/components/responses/VerificationExpired' }
+        '404': { $ref: '#/components/responses/UserNotFound' }
+        '409': { $ref: '#/components/responses/AlreadyVerified' }
+        '429': { $ref: '#/components/responses/ResendTooSoon' }
+
+  /auth/verification/{channel}/confirm:
+    post:
+      tags: [Registration]
+      operationId: confirmSignupVerificationCode
+      summary: Confirm a sign-up verification code
+      description: |
+        **UC-1 step 3.** Checks the code and marks the contact verified. Once
+        the **email** is verified, the user can sign in. Every wrong guess
+        uses one of the code's 5 attempts.
+      security:
+        - verificationCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Channel'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfirmVerificationCodeRequest' }
+      responses:
+        '200':
+          description: Verified. Body is the updated status.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VerificationStatus' }
+        '400': { $ref: '#/components/responses/CodeCheckBadRequest' }
+        '401': { $ref: '#/components/responses/VerificationExpired' }
+        '404': { $ref: '#/components/responses/UserNotFound' }
+        '409': { $ref: '#/components/responses/CodeRace' }
+        '422': { $ref: '#/components/responses/NoCode' }
+        '429': { $ref: '#/components/responses/CodeLocked' }
+
+  # ──────────────────────────── Authentication ────────────────────────────
+  /auth/login:
+    post:
+      tags: [Authentication]
+      operationId: login
+      summary: Sign in
+      description: |
+        **UC-2.** Checks email + password and starts a new session for this
+        device. Device name, user agent and IP are recorded for the session list.
+
+        Unknown email and wrong password get the same 401, in the same time.
+        Right password with an unverified email gets 403 and a
+        `verification_token` cookie, so the app can resume UC-1.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Signed in.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/SetSessionCookies' }
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401':
+          description: Wrong credentials.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                IDENTITY_INVALID_CREDENTIALS:
+                  summary: Unknown email or wrong password (deliberately identical)
+                  value: { statusCode: 401, code: IDENTITY_INVALID_CREDENTIALS, message: Invalid email or password }
+        '403':
+          description: Email not verified. A `verification_token` cookie is set.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/SetVerificationCookie' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                IDENTITY_EMAIL_NOT_VERIFIED:
+                  summary: Right password, email never verified
+                  value:
+                    statusCode: 403
+                    code: IDENTITY_EMAIL_NOT_VERIFIED
+                    message: Your email isn't verified. Complete your registration to sign in
+
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      operationId: refresh
+      summary: Refresh the access token
+      description: |
+        **UC-3.** Call once after any `401 AUTH_TOKEN_EXPIRED`, then retry.
+        Needs only the `refresh_token` cookie.
+
+        The refresh token is **single use**: each call replaces both cookies.
+        Presenting an already-used one revokes the session.
+
+        On **any** error both cookies are cleared: show the sign-in screen.
+      security:
+        - refreshCookie: []
+      responses:
+        '200':
+          description: New access and refresh tokens set.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/SetSessionCookies' }
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RefreshResponse' }
+        '401':
+          description: Session can't be refreshed. Cookies are cleared; sign in again.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/ClearSessionCookies' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                IDENTITY_INVALID_REFRESH_TOKEN:
+                  summary: Cookie missing, malformed or unknown, or the user no longer exists
+                  value: { statusCode: 401, code: IDENTITY_INVALID_REFRESH_TOKEN, message: 'Session is no longer valid, please sign in again' }
+                IDENTITY_SESSION_EXPIRED:
+                  summary: Idle or absolute session lifetime passed
+                  value: { statusCode: 401, code: IDENTITY_SESSION_EXPIRED, message: 'Session is no longer valid, please sign in again' }
+                IDENTITY_SESSION_REVOKED:
+                  summary: The session was signed out
+                  value: { statusCode: 401, code: IDENTITY_SESSION_REVOKED, message: 'Session is no longer valid, please sign in again' }
+                IDENTITY_REFRESH_TOKEN_REUSED:
+                  summary: Old refresh token replayed, or two refreshes raced. Session revoked.
+                  value: { statusCode: 401, code: IDENTITY_REFRESH_TOKEN_REUSED, message: 'Session is no longer valid, please sign in again' }
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: logout
+      summary: Sign out this device
+      description: |
+        **UC-4.** Ends the session of the `refresh_token` cookie and clears both
+        auth cookies. Idempotent and never fails: a missing or unknown cookie
+        is not an error.
+      security:
+        - refreshCookie: []
+        - {}
+      responses:
+        '204':
+          description: Signed out (or already was).
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/ClearSessionCookies' }
+
+  /auth/logout-all:
+    post:
+      tags: [Authentication]
+      operationId: logoutAll
+      summary: Sign out every device
+      description: |
+        **UC-4.** Ends every active session of the user, this one included,
+        and clears this browser's cookies. Other devices find out at once via
+        `/auth/sessions/events`, or on their next request.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: All sessions ended.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/ClearSessionCookies' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogoutAllResponse' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  # ─────────────────────────────── Sessions ───────────────────────────────
+  /auth/sessions:
+    get:
+      tags: [Sessions]
+      operationId: listMySessions
+      summary: List my signed-in devices
+      description: |
+        **UC-4.** Active sessions (not revoked, not expired), most recently
+        used first. `current: true` marks the session making this request.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Active sessions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/sessions/{id}:
+    delete:
+      tags: [Sessions]
+      operationId: revokeSession
+      summary: Sign out one device
+      description: |
+        **UC-4.** Ends one of the user's sessions ("sign out my old laptop").
+        Ending the **current** session also clears this browser's cookies.
+        Someone else's session gets the same 404 as a missing one.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Session id from `GET /auth/sessions`.
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Session ended.
+        '400':
+          description: '`id` is not a UUID.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { statusCode: 400, message: 'Validation failed (uuid is expected)', error: Bad Request }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404':
+          description: Session not found (or not yours).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                IDENTITY_SESSION_NOT_FOUND:
+                  summary: Unknown session, or owned by someone else
+                  value: { statusCode: 404, code: IDENTITY_SESSION_NOT_FOUND, message: 'Session 3f2b9c1e-8a4d-4e6b-9f0a-1c2d3e4f5a6b not found' }
+
+  /auth/sessions/events:
+    get:
+      tags: [Sessions]
+      operationId: sessionEvents
+      summary: Live notice when this session ends (SSE)
+      description: |
+        **UC-4.** A Server-Sent Events stream for the session of the access
+        token. Open once while signed in:
+        `new EventSource(url, { withCredentials: true })`.
+
+        | event | data | meaning |
+        |---|---|---|
+        | `ping` | empty | heartbeat every 25 s; ignore |
+        | `session-revoked` | `{"reason": "<SessionRevocationReason>"}` | this session ended: clear state, show sign-in. The stream then closes. |
+
+        Do **not** auto-reconnect after `session-revoked`; the reconnect
+        would get `401 AUTH_SESSION_REVOKED`.
+
+        *Limitation:* events are in-memory, so this works with a single API
+        instance only for now.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: An open event stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+              example: |
+                event: ping
+                data:
+
+                event: session-revoked
+                data: {"reason":"REVOKED_BY_USER"}
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  # ─────────────────────────────── Password ───────────────────────────────
+  /auth/password-reset/request:
+    post:
+      tags: [Password]
+      operationId: requestPasswordReset
+      summary: 'Forgot password: email a reset code'
+      description: |
+        **UC-5 step 1.** No sign-in needed. If the email has an account, a
+        6-digit code is sent to it.
+
+        The answer is **always the same 200**: for unknown emails, inside the
+        60 s resend cooldown (the earlier code stays valid), and even if
+        sending failed. This endpoint cannot be used to find out who has an account.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RequestPasswordResetRequest' }
+      responses:
+        '200':
+          description: Accepted. A code was sent if the account exists.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PasswordResetRequested' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+
+  /auth/password-reset/confirm:
+    post:
+      tags: [Password]
+      operationId: confirmPasswordReset
+      summary: 'Forgot password: set a new password'
+      description: |
+        **UC-5 step 2.** Checks the code and sets the new password. **Every**
+        session of the account is signed out and this browser's auth cookies
+        are cleared.
+
+        An unknown email gets the same `IDENTITY_NO_VERIFICATION_CODE` as an
+        email that never requested a code.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResetPasswordRequest' }
+      responses:
+        '204':
+          description: Password reset. All sessions ended.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/ClearSessionCookies' }
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+        '400': { $ref: '#/components/responses/CodeCheckBadRequest' }
+        '409': { $ref: '#/components/responses/CodeRace' }
+        '422': { $ref: '#/components/responses/NoCode' }
+        '429': { $ref: '#/components/responses/CodeLocked' }
+
+  /users/me/password/code:
+    post:
+      tags: [Password]
+      operationId: sendChangePasswordCode
+      summary: Email a code to change my password
+      description: |
+        **UC-6 step 1.** Emails a 6-digit code to the signed-in account's
+        address. Asking again within 60 s quietly keeps the earlier code.
+        `resendAvailableAt` says when the app may offer "Resend".
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Code sent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PasswordResetRequested' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /users/me/password:
+    post:
+      tags: [Password]
+      operationId: changePassword
+      summary: Change my password
+      description: |
+        **UC-6 step 2.** Checks the code and sets the new password. Every
+        **other** session is signed out; this one stays signed in.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChangePasswordRequest' }
+      responses:
+        '204':
+          description: Password changed.
+        '400': { $ref: '#/components/responses/CodeCheckBadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '409': { $ref: '#/components/responses/CodeRace' }
+        '422': { $ref: '#/components/responses/NoCode' }
+        '429': { $ref: '#/components/responses/CodeLocked' }
+
+  # ──────────────────────────────── Profile ───────────────────────────────
+  /users/me:
+    get:
+      tags: [Profile]
+      operationId: getMyProfile
+      summary: Get my profile
+      description: '**UC-7.** The signed-in user''s account, including which contacts are verified.'
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/UserNotFound' }
+    patch:
+      tags: [Profile]
+      operationId: updateMyDetails
+      summary: Update my name and/or phone
+      description: |
+        **UC-7.** PATCH semantics: send only the fields that change.
+        All-or-nothing: if one field is invalid, nothing changes. Email and
+        role cannot be changed here.
+
+        A **different** phone number becomes unverified; verify it again with
+        `POST /users/me/verification/phone/send`.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateUserDetailsRequest' }
+      responses:
+        '200':
+          description: Updated. Body is the new profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserProfile' }
+        '400':
+          description: Invalid input.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                VALIDATION_FAILED:
+                  summary: Body breaks a validation rule
+                  value: { statusCode: 400, message: ['phone must be 10-15 digits, optionally starting with +'], error: Bad Request }
+                IDENTITY_INVALID_FULL_NAME: { $ref: '#/components/examples/InvalidFullName' }
+                IDENTITY_INVALID_PHONE: { $ref: '#/components/examples/InvalidPhone' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/UserNotFound' }
+
+  /users/me/verification/{channel}/send:
+    post:
+      tags: [Profile]
+      operationId: sendMyVerificationCode
+      summary: Send me a verification code
+      description: |
+        **UC-7.** Re-verify a contact, typically the phone after changing it.
+        Sends a 6-digit code to the current email or phone.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Channel'
+      responses:
+        '200':
+          description: Code sent. `sentTo` is masked for display.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VerificationCodeSent' }
+        '400': { $ref: '#/components/responses/InvalidChannel' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/UserNotFound' }
+        '409': { $ref: '#/components/responses/AlreadyVerified' }
+        '429': { $ref: '#/components/responses/ResendTooSoon' }
+
+  /users/me/verification/{channel}/confirm:
+    post:
+      tags: [Profile]
+      operationId: confirmMyVerificationCode
+      summary: Confirm my verification code
+      description: |
+        **UC-7.** Checks the code and marks the contact verified. Answers with
+        the updated profile, so no extra `GET /users/me` is needed.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Channel'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfirmVerificationCodeRequest' }
+      responses:
+        '200':
+          description: Verified. Body is the updated profile.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserProfile' }
+        '400': { $ref: '#/components/responses/CodeCheckBadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/UserNotFound' }
+        '409': { $ref: '#/components/responses/CodeRace' }
+        '422': { $ref: '#/components/responses/NoCode' }
+        '429': { $ref: '#/components/responses/CodeLocked' }
+
+  # ───────────────────────────── Admin access ─────────────────────────────
+  /admin-access-requests:
+    post:
+      tags: [Admin access]
+      operationId: submitAdminAccessRequest
+      summary: Ask to become an admin
+      description: |
+        **UC-8 step 1.** Only a `USER` with a verified email may ask, and only
+        one request can be pending at a time. The reason is trimmed before
+        the length check.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubmitAdminAccessRequestRequest' }
+      responses:
+        '201':
+          description: Request created, status `PENDING`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminAccessRequest' }
+        '400':
+          description: Reason missing, or shorter than 10 / longer than 500 characters.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                VALIDATION_FAILED:
+                  summary: Body breaks a validation rule
+                  value: { statusCode: 400, message: [reason must be longer than or equal to 10 characters], error: Bad Request }
+                IDENTITY_INVALID_ADMIN_ACCESS_REASON:
+                  summary: Too short once surrounding spaces are removed
+                  value: { statusCode: 400, code: IDENTITY_INVALID_ADMIN_ACCESS_REASON, message: Reason must be between 10 and 500 characters }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403':
+          description: Not eligible.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                EMAIL_NOT_VERIFIED:
+                  summary: Email not verified yet
+                  value: { statusCode: 403, code: IDENTITY_NOT_ELIGIBLE_FOR_ADMIN_ACCESS, message: Verify your email before requesting admin access }
+                ALREADY_ADMIN:
+                  summary: Caller is already ADMIN or SUPER_ADMIN
+                  value: { statusCode: 403, code: IDENTITY_NOT_ELIGIBLE_FOR_ADMIN_ACCESS, message: You already have admin rights }
+        '404': { $ref: '#/components/responses/UserNotFound' }
+        '409':
+          description: A pending request already exists.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { statusCode: 409, code: IDENTITY_ADMIN_ACCESS_ALREADY_PENDING, message: You already have a pending admin access request }
+    get:
+      tags: [Admin access]
+      operationId: listAdminAccessRequests
+      summary: Approval queue and history (super admin)
+      description: |
+        **UC-8 step 2.** `status=PENDING` is the queue, **oldest first**.
+        Any other filter (or none) is history, newest first. At most 200 rows.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/AdminAccessRequestStatus' }
+      responses:
+        '200':
+          description: Matching requests.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminAccessRequest' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+
+  /admin-access-requests/mine:
+    get:
+      tags: [Admin access]
+      operationId: listMyAdminAccessRequests
+      summary: My admin-access requests
+      description: |
+        **UC-8 step 4.** Every request the caller has made, newest first,
+        with the super admin's note once decided.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The caller's requests (possibly empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminAccessRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /admin-access-requests/{id}/cancel:
+    post:
+      tags: [Admin access]
+      operationId: cancelAdminAccessRequest
+      summary: Withdraw my pending request
+      description: |
+        **UC-8 step 4.** Only the requester may cancel. Someone else's request
+        gets the same 404 as a missing one.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AdminAccessRequestId'
+      responses:
+        '204':
+          description: Request cancelled.
+        '400': { $ref: '#/components/responses/BadUuid' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/AdminAccessRequestNotFound' }
+        '409': { $ref: '#/components/responses/AdminAccessRequestConflict' }
+
+  /admin-access-requests/{id}/approve:
+    post:
+      tags: [Admin access]
+      operationId: approveAdminAccessRequest
+      summary: Approve a request (super admin)
+      description: |
+        **UC-8 step 2-3.** Marks the request `APPROVED`. The user becomes
+        `ADMIN` asynchronously (normally within a second) and sees the new
+        role after their next `POST /auth/refresh`.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AdminAccessRequestId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DecideAdminAccessRequestRequest' }
+      responses:
+        '200':
+          description: The decided request.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminAccessRequest' }
+        '400': { $ref: '#/components/responses/DecisionBadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/AdminAccessRequestNotFound' }
+        '409': { $ref: '#/components/responses/AdminAccessRequestConflict' }
+
+  /admin-access-requests/{id}/reject:
+    post:
+      tags: [Admin access]
+      operationId: rejectAdminAccessRequest
+      summary: Reject a request (super admin)
+      description: |
+        **UC-8 step 2.** Marks the request `REJECTED`. The note is shown to the
+        requester. They may submit a new request later.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AdminAccessRequestId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DecideAdminAccessRequestRequest' }
+      responses:
+        '200':
+          description: The decided request.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminAccessRequest' }
+        '400': { $ref: '#/components/responses/DecisionBadRequest' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/AdminAccessRequestNotFound' }
+        '409': { $ref: '#/components/responses/AdminAccessRequestConflict' }
+
+  # ───────────────────────────────── Admins ─────────────────────────────────
+  /admins:
+    get:
+      tags: [Admins]
+      operationId: listAdmins
+      summary: Everyone with admin rights (super admin)
+      description: The super admin first, then admins by name.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Admins and the super admin.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Admin' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+
+  /admins/{userId}:
+    delete:
+      tags: [Admins]
+      operationId: revokeAdminRole
+      summary: Remove admin rights (super admin)
+      description: |
+        Demotes an `ADMIN` to `USER` and **ends all of their sessions at
+        once** (`session-revoked`, reason `ROLE_CHANGED`), so their old ADMIN
+        token stops working on the next request. The super admin can't be demoted.
+      security:
+        - accessCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: User id from `GET /admins`.
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Demoted; sessions are being ended.
+        '400': { $ref: '#/components/responses/BadUuid' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403':
+          description: Caller isn't the super admin, or the target is the super admin.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                INSUFFICIENT_ROLE:
+                  summary: Caller isn't SUPER_ADMIN
+                  value: { statusCode: 403, message: Insufficient role, error: Forbidden }
+                IDENTITY_SUPER_ADMIN_ROLE_IMMUTABLE:
+                  summary: Target is the super admin
+                  value: { statusCode: 403, code: IDENTITY_SUPER_ADMIN_ROLE_IMMUTABLE, message: "The super admin's role can't be changed" }
+        '404': { $ref: '#/components/responses/UserNotFound' }
+        '422':
+          description: The user is not an admin.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { statusCode: 422, code: IDENTITY_USER_IS_NOT_ADMIN, message: User 3f2b9c1e-8a4d-4e6b-9f0a-1c2d3e4f5a6b is not an admin }
+
+components:
+  securitySchemes:
+    accessCookie:
+      type: apiKey
+      in: cookie
+      name: access_token
+      description: Set by `/auth/login` and `/auth/refresh`. 15-minute JWT.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: For non-browser clients. The same access token as the cookie.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: Single-use, rotated on every refresh. Sent only to `/auth/*`.
+    verificationCookie:
+      type: apiKey
+      in: cookie
+      name: verification_token
+      description: |
+        Set by register (or a login on an unverified account). Valid 30 min,
+        sent only to `/auth/verification/*`.
+
+  parameters:
+    AdminAccessRequestId:
+      name: id
+      in: path
+      required: true
+      description: Request id.
+      schema: { type: string, format: uuid }
+    Channel:
+      name: channel
+      in: path
+      required: true
+      description: Which contact to verify.
+      schema:
+        type: string
+        enum: [email, phone]
+
+  headers:
+    SetSessionCookies:
+      description: |
+        `access_token` (httpOnly, SameSite=Lax, path=/) and `refresh_token`
+        (httpOnly, SameSite=Strict, path=/auth). Login also clears `verification_token`.
+      schema: { type: string }
+    SetVerificationCookie:
+      description: '`verification_token` (httpOnly, SameSite=Strict, path=/auth/verification), valid 30 min.'
+      schema: { type: string }
+    ClearSessionCookies:
+      description: Clears `access_token` and `refresh_token`.
+      schema: { type: string }
+    NoStore:
+      description: Always `no-store`; the response must not be cached.
+      schema: { type: string, example: no-store }
+
+  schemas:
+    # ── requests ──
+    RegisterUserRequest:
+      type: object
+      required: [email, password, fullName, phone]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          description: Sign-in name. Stored trimmed and lower-cased; must be unique.
+          example: ankit@example.com
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 72
+          description: Any characters. Stored only as an Argon2id hash.
+          example: S3cure-pass
+        fullName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Display name; must not be blank.
+          example: Ankit Kumar
+        phone:
+          type: string
+          pattern: '^\+?[0-9]{10,15}$'
+          description: Optional "+", then 10-15 digits. Starts unverified.
+          example: '+919876543210'
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          description: Case-insensitive.
+          example: ankit@example.com
+        password:
+          type: string
+          format: password
+          maxLength: 72
+          example: S3cure-pass
+        deviceName:
+          type: string
+          maxLength: 100
+          description: Optional label for this device in the session list.
+          example: Ankit's iPhone
+
+    ConfirmVerificationCodeRequest:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code: { $ref: '#/components/schemas/OtpCode' }
+
+    RequestPasswordResetRequest:
+      type: object
+      required: [email]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          example: ankit@example.com
+
+    ResetPasswordRequest:
+      type: object
+      required: [email, code, newPassword]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          description: The account email the code was sent to.
+          example: ankit@example.com
+        code: { $ref: '#/components/schemas/OtpCode' }
+        newPassword: { $ref: '#/components/schemas/NewPassword' }
+
+    ChangePasswordRequest:
+      type: object
+      required: [code, newPassword]
+      additionalProperties: false
+      properties:
+        code: { $ref: '#/components/schemas/OtpCode' }
+        newPassword: { $ref: '#/components/schemas/NewPassword' }
+
+    UpdateUserDetailsRequest:
+      type: object
+      additionalProperties: false
+      description: Send only the fields that change.
+      properties:
+        fullName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: Ankit Kumar
+        phone:
+          type: string
+          pattern: '^\+?[0-9]{10,15}$'
+          description: A different number resets `phoneVerified` to false.
+          example: '+919876543210'
+
+    OtpCode:
+      type: string
+      pattern: '^[0-9]{6}$'
+      description: The 6-digit code from the email or SMS.
+      example: '042917'
+
+    NewPassword:
+      type: string
+      format: password
+      minLength: 8
+      maxLength: 72
+      description: Same rules as registration.
+      example: N3w-S3cure-pass
+
+    # ── responses ──
+    RegisterUserResponse:
+      type: object
+      required: [userId]
+      properties:
+        userId: { type: string, format: uuid, example: 3f2b9c1e-8a4d-4e6b-9f0a-1c2d3e4f5a6b }
+
+    UserProfile:
+      type: object
+      required: [id, email, fullName, phone, role, createdAt, emailVerified, phoneVerified]
+      properties:
+        id: { type: string, format: uuid, example: 3f2b9c1e-8a4d-4e6b-9f0a-1c2d3e4f5a6b }
+        email: { type: string, format: email, example: ankit@example.com }
+        fullName: { type: string, example: Ankit Kumar }
+        phone: { type: string, example: '+919876543210' }
+        role: { $ref: '#/components/schemas/UserRole' }
+        createdAt: { type: string, format: date-time }
+        emailVerified: { type: boolean, description: Proved with a code sent to the email. }
+        phoneVerified: { type: boolean, description: Proved with a code sent to the phone. }
+
+    LoginResponse:
+      type: object
+      required: [user, accessTokenExpiresAt]
+      description: Tokens are only in httpOnly cookies; the body carries display data.
+      properties:
+        user: { $ref: '#/components/schemas/UserProfile' }
+        accessTokenExpiresAt:
+          type: string
+          format: date-time
+          description: When to expect `AUTH_TOKEN_EXPIRED`; lets the app refresh ahead of time.
+
+    RefreshResponse:
+      type: object
+      required: [accessTokenExpiresAt]
+      properties:
+        accessTokenExpiresAt: { type: string, format: date-time }
+
+    LogoutAllResponse:
+      type: object
+      required: [revoked]
+      properties:
+        revoked: { type: integer, minimum: 0, description: Number of sessions ended., example: 3 }
+
+    Session:
+      type: object
+      required: [id, deviceName, userAgent, ipAddress, createdAt, lastUsedAt, expiresAt, current]
+      properties:
+        id: { type: string, format: uuid }
+        deviceName: { type: string, nullable: true, example: Ankit's iPhone }
+        userAgent: { type: string, nullable: true, maxLength: 512 }
+        ipAddress: { type: string, nullable: true, maxLength: 45, example: 203.0.113.7 }
+        createdAt: { type: string, format: date-time, description: When the user signed in on this device. }
+        lastUsedAt: { type: string, format: date-time, description: Last refresh. }
+        expiresAt: { type: string, format: date-time, description: 'Ends here unless refreshed (idle limit), never after the absolute limit.' }
+        current: { type: boolean, description: True for the session making this request. }
+
+    VerificationStatus:
+      type: object
+      required: [email, phone, emailVerified, phoneVerified]
+      properties:
+        email: { type: string, format: email, example: ankit@example.com }
+        phone: { type: string, example: '+919876543210' }
+        emailVerified: { type: boolean }
+        phoneVerified: { type: boolean }
+
+    VerificationCodeSent:
+      type: object
+      required: [channel, sentTo, expiresAt, resendAvailableAt]
+      properties:
+        channel: { type: string, enum: [EMAIL, PHONE] }
+        sentTo:
+          type: string
+          description: Masked destination, e.g. `an***@example.com` or `*********3210`.
+          example: an***@example.com
+        expiresAt: { type: string, format: date-time, description: 10 minutes after sending. }
+        resendAvailableAt: { type: string, format: date-time, description: When a new code may be requested (60 s). }
+
+    PasswordResetRequested:
+      type: object
+      required: [resendAvailableAt]
+      properties:
+        resendAvailableAt:
+          type: string
+          format: date-time
+          description: When the app may offer "Resend". Same value whether or not the account exists.
+
+    # ── admin access ──
+    SubmitAdminAccessRequestRequest:
+      type: object
+      required: [reason]
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          minLength: 10
+          maxLength: 500
+          description: Why you need admin rights; the super admin reads this.
+          example: I manage the PVR Koramangala screens and need to schedule shows.
+
+    DecideAdminAccessRequestRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        note:
+          type: string
+          maxLength: 500
+          description: Optional message shown to the requester.
+          example: Approved for the Bengaluru venues.
+
+    PersonRef:
+      type: object
+      required: [id, email, fullName]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email, example: ankit@example.com }
+        fullName: { type: string, example: Ankit Kumar }
+
+    AdminAccessRequest:
+      type: object
+      required: [id, status, reason, requestedAt, decidedAt, decisionNote, requester, decidedBy]
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/AdminAccessRequestStatus' }
+        reason: { type: string }
+        requestedAt: { type: string, format: date-time }
+        decidedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Set when approved, rejected or cancelled.
+        decisionNote: { type: string, nullable: true }
+        requester: { $ref: '#/components/schemas/PersonRef' }
+        decidedBy:
+          allOf: [{ $ref: '#/components/schemas/PersonRef' }]
+          nullable: true
+          description: The super admin who approved or rejected. `null` while pending or when cancelled.
+
+    Admin:
+      type: object
+      required: [id, email, fullName, phone, role, adminSince]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        fullName: { type: string }
+        phone: { type: string, example: '+919876543210' }
+        role:
+          type: string
+          enum: [ADMIN, SUPER_ADMIN]
+        adminSince:
+          type: string
+          format: date-time
+          nullable: true
+          description: When their request was approved; `null` for the super admin.
+
+    # ── enums ──
+    UserRole:
+      type: string
+      description: Ranked USER < ADMIN < SUPER_ADMIN.
+      enum: [USER, ADMIN, SUPER_ADMIN]
+
+    AdminAccessRequestStatus:
+      type: string
+      description: PENDING → APPROVED | REJECTED (super admin) | CANCELLED (requester). Final once decided.
+      enum: [PENDING, APPROVED, REJECTED, CANCELLED]
+
+    SessionRevocationReason:
+      type: string
+      description: Sent in the `session-revoked` SSE event. `ROLE_CHANGED` = admin rights removed.
+      enum: [LOGOUT, LOGOUT_ALL, REVOKED_BY_USER, REUSE_DETECTED, PASSWORD_RESET, USER_GONE, ROLE_CHANGED]
+
+    # ── errors ──
+    Error:
+      type: object
+      required: [statusCode, message]
+      properties:
+        statusCode: { type: integer, example: 401 }
+        code:
+          type: string
+          description: Stable error code to branch on. Absent on request-validation errors.
+          example: AUTH_TOKEN_EXPIRED
+        message:
+          description: Displayable text. An array (one item per rule) for validation errors.
+          oneOf:
+            - type: string
+            - type: array
+              items: { type: string }
+        error:
+          type: string
+          description: HTTP reason phrase; only on framework errors (validation, bad params).
+          example: Bad Request
+
+  examples:
+    RegisterValidation:
+      summary: Body breaks a validation rule
+      value:
+        statusCode: 400
+        message: [email must be an email, password must be longer than or equal to 8 characters]
+        error: Bad Request
+    InvalidFullName:
+      summary: Full name blank after trimming
+      value: { statusCode: 400, code: IDENTITY_INVALID_FULL_NAME, message: Full name must be between 1 and 100 characters }
+    InvalidPhone:
+      summary: Not 10-15 digits after removing spaces, dashes and brackets
+      value: { statusCode: 400, code: IDENTITY_INVALID_PHONE, message: '"12-34" is not a valid phone number (optional +, then 10-15 digits)' }
+    EmailAlreadyRegistered:
+      summary: An account already uses this email
+      value: { statusCode: 409, code: IDENTITY_EMAIL_ALREADY_REGISTERED, message: An account with this email already exists }
+
+  responses:
+    ValidationFailed:
+      description: Request body breaks a validation rule.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 400, message: [email must be an email], error: Bad Request }
+
+    Unauthenticated:
+      description: Not signed in, or the token/session is no longer valid.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            AUTH_TOKEN_MISSING:
+              summary: No access-token cookie and no Bearer header
+              value: { statusCode: 401, code: AUTH_TOKEN_MISSING, message: Missing access token }
+            AUTH_TOKEN_EXPIRED:
+              summary: Access token expired. Call POST /auth/refresh once, then retry.
+              value: { statusCode: 401, code: AUTH_TOKEN_EXPIRED, message: Access token expired }
+            AUTH_TOKEN_INVALID:
+              summary: Forged, malformed, or for another issuer/audience
+              value: { statusCode: 401, code: AUTH_TOKEN_INVALID, message: Invalid access token }
+            AUTH_SESSION_REVOKED:
+              summary: Session signed out (here or elsewhere) or expired. Sign in again.
+              value: { statusCode: 401, code: AUTH_SESSION_REVOKED, message: Session has ended }
+
+    VerificationExpired:
+      description: Verification cookie missing, forged or older than 30 minutes. Sign in again to get a new one.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 401, code: AUTH_VERIFICATION_EXPIRED, message: Your verification link expired. Sign in to continue }
+
+    UserNotFound:
+      description: The account was deleted after the token was issued.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 404, code: IDENTITY_USER_NOT_FOUND, message: User 3f2b9c1e-8a4d-4e6b-9f0a-1c2d3e4f5a6b not found }
+
+    InvalidChannel:
+      description: Path `channel` is not `email` or `phone`.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 400, message: 'channel must be "email" or "phone"', error: Bad Request }
+
+    AlreadyVerified:
+      description: This contact is already verified; no code is sent.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 409, code: IDENTITY_ALREADY_VERIFIED, message: Your email is already verified }
+
+    ResendTooSoon:
+      description: A code for this channel was sent less than 60 seconds ago.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 429, code: IDENTITY_VERIFICATION_RESEND_TOO_SOON, message: Please wait 42 seconds before requesting a new code }
+
+    CodeCheckBadRequest:
+      description: Malformed request, or the code is wrong or expired.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            VALIDATION_FAILED:
+              summary: Code not 6 digits (or another body rule broken)
+              value: { statusCode: 400, message: [code must be 6 digits], error: Bad Request }
+            INVALID_CHANNEL:
+              summary: Path `channel` is not email or phone (verification endpoints only)
+              value: { statusCode: 400, message: 'channel must be "email" or "phone"', error: Bad Request }
+            IDENTITY_VERIFICATION_CODE_INVALID:
+              summary: Wrong code; attempts remaining shown
+              value: { statusCode: 400, code: IDENTITY_VERIFICATION_CODE_INVALID, message: "That code isn't right. 3 attempts left" }
+            IDENTITY_VERIFICATION_CODE_EXPIRED:
+              summary: Older than 10 min, already used, or sent to a contact that has since changed
+              value: { statusCode: 400, code: IDENTITY_VERIFICATION_CODE_EXPIRED, message: This code has expired. Request a new code }
+
+    NoCode:
+      description: No code was ever requested for this channel (or, for password reset, the email has no account).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 422, code: IDENTITY_NO_VERIFICATION_CODE, message: No code has been sent yet. Request a new code }
+
+    CodeLocked:
+      description: 5 wrong attempts; this code is dead. Request a new one.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 429, code: IDENTITY_VERIFICATION_CODE_LOCKED, message: Too many wrong attempts. Request a new code }
+
+    CodeRace:
+      description: Two requests used the same code at the same moment. Retry.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 409, code: IDENTITY_CONCURRENT_VERIFICATION_UPDATE, message: This code was used by another request at the same time. Try again }
+
+    InsufficientRole:
+      description: Signed in, but the role is too low (super admin only).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 403, message: Insufficient role, error: Forbidden }
+
+    BadUuid:
+      description: Path id is not a UUID.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 400, message: 'Validation failed (uuid is expected)', error: Bad Request }
+
+    AdminAccessRequestNotFound:
+      description: Unknown request (or, for cancel, someone else's).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { statusCode: 404, code: IDENTITY_ADMIN_ACCESS_REQUEST_NOT_FOUND, message: Admin access request 3f2b9c1e-8a4d-4e6b-9f0a-1c2d3e4f5a6b not found }
+
+    AdminAccessRequestConflict:
+      description: Already decided or cancelled, or changed by another request at the same moment.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            IDENTITY_ADMIN_ACCESS_REQUEST_NOT_PENDING:
+              summary: Already approved, rejected or cancelled
+              value: { statusCode: 409, code: IDENTITY_ADMIN_ACCESS_REQUEST_NOT_PENDING, message: This request is already approved }
+            IDENTITY_CONCURRENT_ADMIN_ACCESS_UPDATE:
+              summary: Another tab decided it first. Reload.
+              value: { statusCode: 409, code: IDENTITY_CONCURRENT_ADMIN_ACCESS_UPDATE, message: This request was changed by someone else. Reload and try again }
+
+    DecisionBadRequest:
+      description: Path id not a UUID, or note too long.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            BAD_UUID:
+              summary: '`id` is not a UUID'
+              value: { statusCode: 400, message: 'Validation failed (uuid is expected)', error: Bad Request }
+            VALIDATION_FAILED:
+              summary: Note longer than 500 characters
+              value: { statusCode: 400, message: [note must be shorter than or equal to 500 characters], error: Bad Request }
