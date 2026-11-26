@@ -184,21 +184,84 @@ Insert the event into an `outbox` table in the same DB transaction as the state 
 ## 7. Low-level design rules
 
 Hexagonal / ports-and-adapters, dependencies point inward:
-`presentation` & `infrastructure` → `application` → `domain` → nothing.
 
-```
-src/<context>/
-  domain/            pure TS — no NestJS, TypeORM, Redis imports
-    *.aggregate.ts, value-objects/, events/, policies/, *.repository.ts (port interface)
-  application/
-    commands/        *.handler.ts (use cases: load → call domain → save → publish)
-    queries/         read models (flat rows, light CQRS)
-    ports/           seat-lock.port.ts, event-publisher.port.ts, ...
-  infrastructure/
-    persistence/     *.orm-entity.ts, typeorm-*.repository.ts, *.mapper.ts
-    redis/, messaging/ (outbox relay, consumers)
-  presentation/      controllers, dto/, websocket gateways
-```
+src/
+├── <module>/                          e.g. booking/
+│   ├── domain/                        pure TS — no NestJS, TypeORM, Redis imports
+│   │   ├── booking.aggregate.ts
+│   │   ├── value-objects/
+│   │   ├── events/
+│   │   ├── policies/
+│   │   └── ports/                     interfaces the domain/features depend on
+│   │       ├── booking.repository.ts
+│   │       ├── seat-lock.port.ts
+│   │       └── event-publisher.port.ts
+│   │
+│   ├── infra/                         repositories + 3rd-party adapters (implements ports)
+│   │   ├── persistence/
+│   │   │   ├── booking.orm-entity.ts
+│   │   │   ├── booking.mapper.ts
+│   │   │   └── typeorm-booking.repository.ts
+│   │   ├── redis/
+│   │   │   └── redis-seat-lock.adapter.ts
+│   │   ├── messaging/                 outbox relay, consumers
+│   │   ├── payment-gateway/           e.g. razorpay/stripe client
+│   │   └── booking-infra.module.ts    binds ports → adapters, exports providers
+│   │
+│   ├── features/                      one NestJS module per use case
+│   │   ├── create-booking/
+│   │   │   ├── create-booking.controller.ts
+│   │   │   ├── create-booking.handler.ts     load → domain → save → publish
+│   │   │   ├── create-booking.dto.ts
+│   │   │   └── create-booking.module.ts
+│   │   ├── cancel-booking/
+│   │   │   └── ...
+│   │   ├── get-booking-details/              query feature (flat read model)
+│   │   │   ├── get-booking-details.controller.ts
+│   │   │   ├── get-booking-details.query.ts
+│   │   │   └── get-booking-details.module.ts
+│   │   └── seat-updates/                     websocket gateway feature
+│   │       ├── seat-updates.gateway.ts
+│   │       └── seat-updates.module.ts
+│   │
+│   └── booking.module.ts              service module: imports infra + all feature modules
+│
+├── shared/
+│   ├── domain/                        base building blocks, pure TS
+│   │   ├── aggregate-root.ts
+│   │   ├── entity.ts
+│   │   ├── value-object.ts
+│   │   ├── domain-event.ts
+│   │   └── result.ts / errors.ts
+│   │
+│   ├── infra/
+│   │   ├── database/
+│   │   │   ├── typeorm.config.ts
+│   │   │   ├── migrations/
+│   │   │   ├── unit-of-work.ts
+│   │   │   └── database.module.ts
+│   │   ├── config/
+│   │   │   ├── env.schema.ts          (zod/joi validation)
+│   │   │   ├── app.config.ts
+│   │   │   └── config.module.ts
+│   │   ├── redis/
+│   │   │   └── redis.module.ts
+│   │   ├── messaging/
+│   │   │   ├── outbox.orm-entity.ts
+│   │   │   └── outbox-relay.service.ts
+│   │   ├── logger/
+│   
+│   │
+│   ├── features/                      cross-cutting feature modules
+│   │   ├── health/
+│   │   │   ├── health.controller.ts
+│   │   │   └── health.module.ts
+│   │   └
+│   │
+│   
+│
+├── app.module.ts                      imports SharedModule + each <module>.module.ts
+└── main.ts
 
 - **Rich domain model**: business rules live in aggregates, never set status from outside.
 - **Patterns**: State (status transitions), Strategy (refund policy, pricing), Factory, Repository (one per aggregate root), Adapter (Stripe, Redis, RabbitMQ, Mailer), Observer (domain events), light CQRS via `@nestjs/cqrs`.

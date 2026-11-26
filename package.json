@@ -18,14 +18,14 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "typeorm": "typeorm-ts-node-commonjs -d src/database/data-source.ts",
+    "typeorm": "typeorm-ts-node-commonjs -d src/shared/infra/database/data-source.ts",
     "migration:run": "npm run typeorm -- migration:run",
     "migration:revert": "npm run typeorm -- migration:revert",
     "migration:show": "npm run typeorm -- migration:show",
     "migration:generate": "npm run typeorm -- migration:generate",
     "migration:create": "typeorm-ts-node-commonjs migration:create",
-    "seed:super-admin": "ts-node src/identity/presentation/cli/seed-super-admin.ts",
-    "seed:super-admin:prod": "node dist/identity/presentation/cli/seed-super-admin.js"
+    "seed:super-admin": "ts-node src/identity/features/seed-super-admin/seed-super-admin.cli.ts",
+    "seed:super-admin:prod": "node dist/identity/features/seed-super-admin/seed-super-admin.cli.js"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",

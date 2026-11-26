@@ -11,7 +11,7 @@ import { AdminAccessRejected } from '../events/admin-access-rejected.event';
 import { AdminAccessRequestCancelled } from '../events/admin-access-request-cancelled.event';
 import { AdminAccessRequested } from '../events/admin-access-requested.event';
 import { User } from '../user.aggregate';
-import { UserRole } from '../user-role.enum';
+import { UserRole } from '../../../shared/domain/user-role.enum';
 import { VerificationChannel } from '../verification/verification-channel.enum';
 import { AdminAccessRequestStatus } from './admin-access-request-status.enum';
 

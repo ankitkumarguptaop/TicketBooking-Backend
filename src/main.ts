@@ -2,7 +2,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import * as cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
-import { relaxConnectAttemptTimeout } from './database/typeorm-options';
+import { relaxConnectAttemptTimeout } from './shared/infra/database/typeorm-options';
 
 relaxConnectAttemptTimeout();
 

@@ -9,7 +9,7 @@ Backend for a **movie ticket booking platform**, built as a learning/portfolio p
 Core flow to get right: **hold seats → pay → confirm → notify**.
 
 ### Current state
-- Fresh NestJS 11 scaffold (`src/app.*`), npm (`package-lock.json`), Jest, ESLint, Prettier.
+- NestJS 11, npm (`package-lock.json`), Jest, ESLint, Prettier. `identity` is built; other contexts not started.
 - Strategy: **modular monolith first** (one NestJS app, strict module boundaries), split into 5 services + gateway in Phase 5. Do not introduce microservices or a monorepo split before the plan calls for it. RabbitMQ arrives in Phase 3 for delayed jobs (hold expiry) and becomes the service-to-service event bus in Phase 5.
 
 ## Commands
@@ -26,11 +26,11 @@ npm run test:cov
 npm run migration:run       # apply pending migrations
 npm run migration:revert    # undo the last one
 npm run migration:show      # list applied / pending
-npm run migration:generate -- src/<context>/infrastructure/persistence/migrations/<Name>
+npm run migration:generate -- src/<context>/infra/persistence/migrations/<Name>
                             # diff entities vs DB into a new migration (review it before committing)
 ```
 
-Migrations live per context in `src/<context>/infrastructure/persistence/migrations/` and touch only that context's schema. `DB_SYNCHRONIZE` stays `false`.
+Migrations live per context in `src/<context>/infra/persistence/migrations/` and touch only that context's schema. `DB_SYNCHRONIZE` stays `false`.
 
 ## How Claude should help (important)
 
@@ -54,27 +54,42 @@ When asked to review: point to lines and explain which rule is broken; don't sil
 
 ### Bounded contexts (modules under `src/`)
 `identity`, `catalog`, `venue`, `scheduling`, `booking` (core), `payment`, `notification`, `review`.
-Modules **must not** import another module's domain or infrastructure, or read its tables.
+Modules **must not** import another module's domain, infra or features, or read its tables.
 
-**Database:** one PostgreSQL database, **one schema per bounded context**, with the same names as the modules above. Every entity sets its schema (`@Entity({ schema: 'identity', name: 'users' })`). No cross-schema joins, foreign keys or queries: reference other contexts by id only. A module's migrations touch only its own schema. See `docs/REQUIREMENTS.md` §5.1. Cross-context communication is via domain events (in-process event bus now, RabbitMQ later) or a narrow application-layer port.
+**Database:** one PostgreSQL database, **one schema per bounded context**, with the same names as the modules above. Every entity sets its schema (`@Entity({ schema: 'identity', name: 'users' })`). No cross-schema joins, foreign keys or queries: reference other contexts by id only. A module's migrations touch only its own schema. See `docs/REQUIREMENTS.md` §5.1. Cross-context communication is via domain events (in-process event bus now, RabbitMQ later) or a narrow port.
 
-### Layers inside each context
+### Layout inside each context (vertical slices — full tree in `docs/REQUIREMENTS.md` §7)
 ```
 src/<context>/
-  domain/          pure TypeScript — NO @nestjs/*, TypeORM, Redis, or other framework imports
-  application/     commands/, queries/ (use-case handlers), ports/ (interfaces)
-  infrastructure/  persistence/ (TypeORM entities, repos + mappers), redis/, messaging/
-  presentation/    controllers, dto/, websocket gateways
+  domain/            pure TypeScript — NO @nestjs/*, TypeORM, Redis, or other framework imports
+    *.aggregate.ts, value-objects/, events/, policies/, errors/
+    ports/           every interface the features depend on: *.repository.ts, *.port.ts
+  infra/             adapters that implement the ports
+    persistence/     *.orm-entity.ts, *.mapper.ts, typeorm-*.repository.ts, migrations/
+    messaging/       outbox writer + relay, email/SMS adapters
+    redis/, security/, http/ (context-wide guards, cookies, pipes)
+    <context>-infra.module.ts   binds ports → adapters, exports what features inject
+  features/<use-case>/          one NestJS module per use case
+    <use-case>.controller.ts    (several if the use case has several entry points)
+    <use-case>.command.ts | .query.ts, <use-case>.handler.ts, *.dto.ts, *.view.ts
+    <use-case>.module.ts        imports <context>-infra.module, declares controller + handler
+  <context>.module.ts           imports the infra module + every feature module
+src/shared/
+  domain/            shared kernel (AggregateRoot, DomainEvent, DomainError, UserRole)
+  infra/auth/        JwtAuthGuard, RolesGuard, @CurrentUser, @Roles (global AuthModule)
+  infra/database/, infra/http/ (DomainErrorFilter), infra/messaging/
+  features/health/
+  shared.module.ts
 ```
-Dependencies point inward only: presentation/infrastructure → application → domain.
+Dependencies point inward only: features/infra → domain. `shared/` never imports a context; a context plugs into `shared/` through a port (e.g. `ActiveSessionChecker`, wired in `app.module.ts`). A feature may import another feature's command/query/view/DTO classes, never its handler.
 
 ### DDD conventions
 - **Rich model**: business rules and state transitions live in the aggregate (`booking.confirm()`, `booking.cancel(now)`). Never set `status` from outside. Illegal transitions throw domain errors.
 - Aggregates are small and reference each other **by id only**. One transaction modifies one aggregate; the rest happens via domain events.
 - Create aggregates through factories (`Booking.create(...)`) so invalid state can't exist.
 - Value objects are immutable (`Money`, `SeatRef`, `TimeSlot`, `HoldWindow`).
-- Repository interface lives in `domain/`; TypeORM implementation in `infrastructure/persistence/`.
-- Application handlers: load → call domain → save. The repository writes the aggregate's events to the context's outbox in the same transaction; a relay publishes them (ADR 005). No business rules in handlers.
+- Repository interface lives in `domain/ports/`; TypeORM implementation in `infra/persistence/`.
+- Feature handlers: load → call domain → save. The repository writes the aggregate's events to the context's outbox in the same transaction; a relay publishes them (ADR 005). No business rules in handlers.
 - Light CQRS via `@nestjs/cqrs`: commands mutate aggregates; queries read flat rows directly.
 - Domain errors are mapped to HTTP status codes in **one** exception filter.
 - Pass `now: Date` into domain methods instead of calling `new Date()` inside the domain (testability).

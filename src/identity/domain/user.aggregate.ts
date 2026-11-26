@@ -10,7 +10,7 @@ import { AdminRoleRevoked } from './events/admin-role-revoked.event';
 import { ContactVerified } from './events/contact-verified.event';
 import { PasswordChanged } from './events/password-changed.event';
 import { UserRegistered } from './events/user-registered.event';
-import { UserRole } from './user-role.enum';
+import { UserRole } from '../../shared/domain/user-role.enum';
 import { Email } from './value-objects/email.vo';
 import {
   ContactChannel,
