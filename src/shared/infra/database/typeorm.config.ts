@@ -40,8 +40,8 @@ const EXT = __filename.endsWith('.ts') ? 'ts' : 'js';
  *   typeOrmConfig('identity')  -> only identity's entities + migrations
  *   typeOrmConfig()            -> every context (what the app uses)
  *
- * Each context keeps entities and migrations under its own
- * src/<context>/infra/persistence/, and its migrations touch only its schema.
+ * Each context keeps them in src/<context>/infra/entities/ and
+ * src/<context>/infra/migrations/; its migrations touch only its schema.
  */
 export default function typeOrmConfig(
   contextName: ContextName | 'default' = 'default',
@@ -53,12 +53,12 @@ export default function typeOrmConfig(
   }
   const config = new ConfigService();
   const moduleName = contextName === 'default' ? '*' : contextName;
-  const persistence = `${ROOT}/${moduleName}/infra/persistence`;
+  const infra = `${ROOT}/${moduleName}/infra`;
 
   const common = {
     type: 'postgres' as const,
-    entities: [`${persistence}/*.orm-entity.${EXT}`],
-    migrations: [`${persistence}/migrations/*.${EXT}`],
+    entities: [`${infra}/entities/*.orm-entity.${EXT}`],
+    migrations: [`${infra}/migrations/*.${EXT}`],
     // One shared history table (public.migrations). Not per-schema: TypeORM
     // creates it before any migration runs, i.e. before CREATE SCHEMA.
     migrationsTableName: 'migrations',

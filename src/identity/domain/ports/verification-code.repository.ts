@@ -1,7 +1,7 @@
 import { VerificationChannel } from '../verification/verification-channel.enum';
 import { VerificationCode } from '../verification/verification-code.aggregate';
 
-/** Port. Implemented in infra/persistence. */
+/** Port. Implemented in infra/repository. */
 export interface VerificationCodeRepository {
   /** The newest code for this user and channel, the only one that counts. */
   findLatest(

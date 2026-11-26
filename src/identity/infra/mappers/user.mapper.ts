@@ -1,6 +1,6 @@
 import { User } from '../../domain/user.aggregate';
 import { Email } from '../../domain/value-objects/email.vo';
-import { UserOrmEntity } from './user.orm-entity';
+import { UserOrmEntity } from '../entities/user.orm-entity';
 
 export class UserMapper {
   static toDomain(row: UserOrmEntity): User {

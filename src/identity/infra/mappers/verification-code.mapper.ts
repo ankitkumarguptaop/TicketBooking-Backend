@@ -1,5 +1,5 @@
 import { VerificationCode } from '../../domain/verification/verification-code.aggregate';
-import { VerificationCodeOrmEntity } from './verification-code.orm-entity';
+import { VerificationCodeOrmEntity } from '../entities/verification-code.orm-entity';
 
 export class VerificationCodeMapper {
   static toDomain(row: VerificationCodeOrmEntity): VerificationCode {

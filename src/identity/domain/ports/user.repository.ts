@@ -2,7 +2,7 @@ import { Email } from '../value-objects/email.vo';
 import { User } from '../user.aggregate';
 import { UserRole } from '../../../shared/domain/user-role.enum';
 
-/** Port. Implemented in infra/persistence. */
+/** Port. Implemented in infra/repository. */
 export interface UserRepository {
   findById(id: string): Promise<User | null>;
   findByEmail(email: Email): Promise<User | null>;

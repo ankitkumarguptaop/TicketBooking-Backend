@@ -1,7 +1,7 @@
 import { EntityManager } from 'typeorm';
 import { DomainEvent } from '../../../shared/domain/domain-event';
 import { eventTypeOf, serializeEvent } from './identity-event-registry';
-import { OutboxMessageOrmEntity } from '../persistence/outbox-message.orm-entity';
+import { OutboxMessageOrmEntity } from '../entities/outbox-message.orm-entity';
 
 /**
  * Appends events to identity.outbox using the CALLER's transaction

@@ -8,7 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { EventBus } from '@nestjs/cqrs';
 import { DataSource } from 'typeorm';
 import { deserializeEvent } from './identity-event-registry';
-import { OutboxMessageOrmEntity } from '../persistence/outbox-message.orm-entity';
+import { OutboxMessageOrmEntity } from '../entities/outbox-message.orm-entity';
 
 const BATCH_SIZE = 100;
 /** After this many failed publishes a row is left for a human to look at. */

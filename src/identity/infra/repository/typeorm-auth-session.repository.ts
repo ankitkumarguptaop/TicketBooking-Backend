@@ -4,8 +4,8 @@ import { IsNull, MoreThan, Repository } from 'typeorm';
 import { ConcurrentSessionUpdateError } from '../../domain/errors/identity.errors';
 import { AuthSession } from '../../domain/session/auth-session.aggregate';
 import { AuthSessionRepository } from '../../domain/ports/auth-session.repository';
-import { AuthSessionMapper } from './auth-session.mapper';
-import { AuthSessionOrmEntity } from './auth-session.orm-entity';
+import { AuthSessionMapper } from '../mappers/auth-session.mapper';
+import { AuthSessionOrmEntity } from '../entities/auth-session.orm-entity';
 import { appendToOutbox } from '../messaging/outbox-writer';
 import { OutboxRelay } from '../messaging/outbox-relay.service';
 

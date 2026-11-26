@@ -1,5 +1,5 @@
 import { AuthSession } from '../../domain/session/auth-session.aggregate';
-import { AuthSessionOrmEntity } from './auth-session.orm-entity';
+import { AuthSessionOrmEntity } from '../entities/auth-session.orm-entity';
 
 export class AuthSessionMapper {
   static toDomain(row: AuthSessionOrmEntity): AuthSession {

@@ -198,10 +198,15 @@ src/
 │   │       └── event-publisher.port.ts
 │   │
 │   ├── infra/                         repositories + 3rd-party adapters (implements ports)
-│   │   ├── persistence/
+│   │   ├── entities/
 │   │   │   ├── booking.orm-entity.ts
-│   │   │   ├── booking.mapper.ts
-│   │   │   └── typeorm-booking.repository.ts
+│   │   │   └── outbox-message.orm-entity.ts   this context's outbox table
+│   │   ├── repository/
+│   │   │   ├── typeorm-booking.repository.ts
+│   │   │   └── typeorm-booking.read-model.ts
+│   │   ├── mappers/
+│   │   │   └── booking.mapper.ts         orm-entity <-> aggregate
+│   │   ├── migrations/                   this context's schema only
 │   │   ├── redis/
 │   │   │   └── redis-seat-lock.adapter.ts
 │   │   ├── messaging/                 outbox relay, consumers
@@ -236,29 +241,26 @@ src/
 │   │
 │   ├── infra/
 │   │   ├── database/
-│   │   │   ├── typeorm.config.ts
-│   │   │   ├── migrations/
+│   │   │   ├── typeorm.config.ts          typeOrmConfig(context | 'default')
+│   │   │   ├── data-source.ts             TypeORM CLI entry (DB_CONTEXT=<context>)
 │   │   │   ├── unit-of-work.ts
 │   │   │   └── database.module.ts
 │   │   ├── config/
 │   │   │   ├── env.schema.ts          (zod/joi validation)
 │   │   │   ├── app.config.ts
 │   │   │   └── config.module.ts
+│   │   ├── auth/                      JwtAuthGuard, RolesGuard, @CurrentUser, @Roles, AuthModule
+│   │   ├── http/                      DomainErrorFilter
 │   │   ├── redis/
 │   │   │   └── redis.module.ts
-│   │   ├── messaging/
-│   │   │   ├── outbox.orm-entity.ts
-│   │   │   └── outbox-relay.service.ts
-│   │   ├── logger/
-│   
+│   │   └── messaging/                 generic helpers (withRetry); outbox tables stay per context
 │   │
 │   ├── features/                      cross-cutting feature modules
-│   │   ├── health/
-│   │   │   ├── health.controller.ts
-│   │   │   └── health.module.ts
-│   │   └
+│   │   └── health/
+│   │       ├── health.controller.ts
+│   │       └── health.module.ts
 │   │
-│   
+│   └── shared.module.ts               config, CQRS, database, error filter, health
 │
 ├── app.module.ts                      imports SharedModule + each <module>.module.ts
 └── main.ts

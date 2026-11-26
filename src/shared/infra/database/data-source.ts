@@ -1,19 +1,20 @@
 import 'dotenv/config';
 import { DataSource } from 'typeorm';
-import {
-  buildTypeOrmOptions,
+import typeOrmConfig, {
+  ContextName,
   relaxConnectAttemptTimeout,
-} from './typeorm-options';
+} from './typeorm.config';
 
 /**
  * Used ONLY by the TypeORM CLI (npm run migration:*), never by the app.
  * Runs from TypeScript sources via ts-node.
+ *
+ * DB_CONTEXT picks one bounded context; unset means all of them:
+ *   npm run migration:run                       every context
+ *   DB_CONTEXT=identity npm run migration:run   identity only
  */
 relaxConnectAttemptTimeout();
 
 export default new DataSource(
-  buildTypeOrmOptions((key) => process.env[key], {
-    entities: ['src/*/infra/persistence/*.orm-entity.ts'],
-    migrations: ['src/*/infra/persistence/migrations/*.ts'],
-  }),
+  typeOrmConfig((process.env.DB_CONTEXT as ContextName) || 'default'),
 );

@@ -26,11 +26,13 @@ npm run test:cov
 npm run migration:run       # apply pending migrations
 npm run migration:revert    # undo the last one
 npm run migration:show      # list applied / pending
-npm run migration:generate -- src/<context>/infra/persistence/migrations/<Name>
+npm run migration:generate -- src/<context>/infra/migrations/<Name>
                             # diff entities vs DB into a new migration (review it before committing)
 ```
 
-Migrations live per context in `src/<context>/infra/persistence/migrations/` and touch only that context's schema. `DB_SYNCHRONIZE` stays `false`.
+DB config is one factory, `typeOrmConfig(contextName)` in `src/shared/infra/database/typeorm.config.ts` (`'default'` = all contexts). Prefix any `migration:*` command with `DB_CONTEXT=<context>` to load only that context's entities and migrations.
+
+Migrations live per context in `src/<context>/infra/migrations/` and touch only that context's schema. `DB_SYNCHRONIZE` stays `false`.
 
 ## How Claude should help (important)
 
@@ -65,8 +67,11 @@ src/<context>/
     *.aggregate.ts, value-objects/, events/, policies/, errors/
     ports/           every interface the features depend on: *.repository.ts, *.port.ts
   infra/             adapters that implement the ports
-    persistence/     *.orm-entity.ts, *.mapper.ts, typeorm-*.repository.ts, migrations/
-    messaging/       outbox writer + relay, email/SMS adapters
+    entities/        *.orm-entity.ts (TypeORM, each sets its own schema)
+    repository/      typeorm-*.repository.ts, typeorm-*.read-model.ts
+    mappers/         *.mapper.ts (orm-entity <-> aggregate)
+    migrations/      this context's migrations only
+    messaging/       outbox writer + relay (outbox table is per context), email/SMS adapters
     redis/, security/, http/ (context-wide guards, cookies, pipes)
     <context>-infra.module.ts   binds ports → adapters, exports what features inject
   features/<use-case>/          one NestJS module per use case
@@ -88,7 +93,7 @@ Dependencies point inward only: features/infra → domain. `shared/` never impor
 - Aggregates are small and reference each other **by id only**. One transaction modifies one aggregate; the rest happens via domain events.
 - Create aggregates through factories (`Booking.create(...)`) so invalid state can't exist.
 - Value objects are immutable (`Money`, `SeatRef`, `TimeSlot`, `HoldWindow`).
-- Repository interface lives in `domain/ports/`; TypeORM implementation in `infra/persistence/`.
+- Repository interface lives in `domain/ports/`; TypeORM implementation in `infra/repository/`.
 - Feature handlers: load → call domain → save. The repository writes the aggregate's events to the context's outbox in the same transaction; a relay publishes them (ADR 005). No business rules in handlers.
 - Light CQRS via `@nestjs/cqrs`: commands mutate aggregates; queries read flat rows directly.
 - Domain errors are mapped to HTTP status codes in **one** exception filter.

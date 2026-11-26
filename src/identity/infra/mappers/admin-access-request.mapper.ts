@@ -1,5 +1,5 @@
 import { AdminAccessRequest } from '../../domain/admin-access/admin-access-request.aggregate';
-import { AdminAccessRequestOrmEntity } from './admin-access-request.orm-entity';
+import { AdminAccessRequestOrmEntity } from '../entities/admin-access-request.orm-entity';
 
 export class AdminAccessRequestMapper {
   static toDomain(row: AdminAccessRequestOrmEntity): AdminAccessRequest {

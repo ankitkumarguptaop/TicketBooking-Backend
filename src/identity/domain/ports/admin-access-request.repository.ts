@@ -1,6 +1,6 @@
 import { AdminAccessRequest } from '../admin-access/admin-access-request.aggregate';
 
-/** Port. Implemented in infra/persistence. */
+/** Port. Implemented in infra/repository. */
 export interface AdminAccessRequestRepository {
   findById(id: string): Promise<AdminAccessRequest | null>;
   /** The user's open request, if any (at most one, enforced by a unique index). */

@@ -10,8 +10,8 @@ import {
 } from '../../domain/errors/identity.errors';
 import { appendToOutbox } from '../messaging/outbox-writer';
 import { OutboxRelay } from '../messaging/outbox-relay.service';
-import { AdminAccessRequestMapper } from './admin-access-request.mapper';
-import { AdminAccessRequestOrmEntity } from './admin-access-request.orm-entity';
+import { AdminAccessRequestMapper } from '../mappers/admin-access-request.mapper';
+import { AdminAccessRequestOrmEntity } from '../entities/admin-access-request.orm-entity';
 
 const PG_UNIQUE_VIOLATION = '23505';
 

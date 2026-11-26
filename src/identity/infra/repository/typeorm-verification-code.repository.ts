@@ -5,8 +5,8 @@ import { ConcurrentVerificationUpdateError } from '../../domain/errors/identity.
 import { VerificationChannel } from '../../domain/verification/verification-channel.enum';
 import { VerificationCode } from '../../domain/verification/verification-code.aggregate';
 import { VerificationCodeRepository } from '../../domain/ports/verification-code.repository';
-import { VerificationCodeMapper } from './verification-code.mapper';
-import { VerificationCodeOrmEntity } from './verification-code.orm-entity';
+import { VerificationCodeMapper } from '../mappers/verification-code.mapper';
+import { VerificationCodeOrmEntity } from '../entities/verification-code.orm-entity';
 
 @Injectable()
 export class TypeOrmVerificationCodeRepository implements VerificationCodeRepository {

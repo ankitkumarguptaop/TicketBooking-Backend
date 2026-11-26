@@ -6,8 +6,8 @@ import { User } from '../../domain/user.aggregate';
 import { UserRole } from '../../../shared/domain/user-role.enum';
 import { UserRepository } from '../../domain/ports/user.repository';
 import { Email } from '../../domain/value-objects/email.vo';
-import { UserMapper } from './user.mapper';
-import { UserOrmEntity } from './user.orm-entity';
+import { UserMapper } from '../mappers/user.mapper';
+import { UserOrmEntity } from '../entities/user.orm-entity';
 import { appendToOutbox } from '../messaging/outbox-writer';
 import { OutboxRelay } from '../messaging/outbox-relay.service';
 

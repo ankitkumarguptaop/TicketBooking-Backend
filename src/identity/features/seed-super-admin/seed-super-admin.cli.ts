@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { CommandBus } from '@nestjs/cqrs';
 import { AppModule } from '../../../app.module';
-import { relaxConnectAttemptTimeout } from '../../../shared/infra/database/typeorm-options';
+import { relaxConnectAttemptTimeout } from '../../../shared/infra/database/typeorm.config';
 import { SeedSuperAdminCommand } from './seed-super-admin.command';
 import { SeedSuperAdminResult } from './seed-super-admin.handler';
 

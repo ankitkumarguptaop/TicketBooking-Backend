@@ -1,6 +1,6 @@
 import { AuthSession } from '../session/auth-session.aggregate';
 
-/** Port. Implemented in infra/persistence. */
+/** Port. Implemented in infra/repository. */
 export interface AuthSessionRepository {
   findById(id: string): Promise<AuthSession | null>;
   /** Not revoked and not expired at `now`, newest first. */
