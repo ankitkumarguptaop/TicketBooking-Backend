@@ -10,20 +10,12 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { CommandBus, QueryBus } from '@nestjs/cqrs';
-import {
-  ApiCookieAuth,
-  ApiOkResponse,
-  ApiParam,
-  ApiTags,
-  ApiUnauthorizedResponse,
-} from '@nestjs/swagger';
 import { ConfirmVerificationCodeCommand } from '../../application/commands/confirm-verification-code/confirm-verification-code.command';
 import { SendVerificationCodeCommand } from '../../application/commands/send-verification-code/send-verification-code.command';
 import { VerificationCodeSentView } from '../../application/commands/send-verification-code/send-verification-code.handler';
 import { GetUserProfileQuery } from '../../application/queries/get-user-profile/get-user-profile.query';
 import { UserProfileView } from '../../application/queries/get-user-profile/user-profile.view';
 import { ContactChannel } from '../../domain/verification/verification-channel.enum';
-import { VERIFICATION_TOKEN_COOKIE } from '../cookies/auth-cookies';
 import { VerifyingUserId } from '../decorators/verifying-user-id.decorator';
 import { ConfirmVerificationCodeRequestDto } from '../dto/confirm-verification-code.request.dto';
 import { VerificationCodeSentResponseDto } from '../dto/verification-code-sent.response.dto';
@@ -39,15 +31,6 @@ function toStatus(user: UserProfileView): VerificationStatusResponseDto {
     phoneVerified: user.phoneVerified,
   };
 }
-
-/**
- * Verification during sign-up, BEFORE the first sign-in. Same rules and
- * use cases as /users/me/verification, but authorised by the short-lived
- * verification cookie instead of a session.
- */
-@ApiTags('auth')
-@ApiCookieAuth(VERIFICATION_TOKEN_COOKIE)
-@ApiUnauthorizedResponse({ description: 'AUTH_VERIFICATION_EXPIRED' })
 @UseGuards(VerificationTokenGuard)
 @Controller('auth/verification')
 export class RegistrationVerificationController {
@@ -58,7 +41,6 @@ export class RegistrationVerificationController {
 
   @Get('status')
   @Header('Cache-Control', 'no-store')
-  @ApiOkResponse({ type: VerificationStatusResponseDto })
   async status(
     @VerifyingUserId() userId: string,
   ): Promise<VerificationStatusResponseDto> {
@@ -72,8 +54,6 @@ export class RegistrationVerificationController {
   /** Sends a new 6-digit code. 429 inside the 60 s resend cooldown. */
   @Post(':channel/send')
   @HttpCode(HttpStatus.OK)
-  @ApiParam({ name: 'channel', enum: ['email', 'phone'] })
-  @ApiOkResponse({ type: VerificationCodeSentResponseDto })
   send(
     @VerifyingUserId() userId: string,
     @Param('channel', parseChannel) channel: ContactChannel,
@@ -88,8 +68,6 @@ export class RegistrationVerificationController {
   @Post(':channel/confirm')
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')
-  @ApiParam({ name: 'channel', enum: ['email', 'phone'] })
-  @ApiOkResponse({ type: VerificationStatusResponseDto })
   async confirm(
     @VerifyingUserId() userId: string,
     @Param('channel', parseChannel) channel: ContactChannel,

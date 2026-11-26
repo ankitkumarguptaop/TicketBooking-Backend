@@ -43,7 +43,7 @@ This is a **learning project**; the developer must be able to explain every line
 - Diagrams and ADRs
 
 **Fine for Claude to write (developer reads every line):**
-- DTOs, validation decorators, Swagger annotations
+- DTOs, validation decorators
 - Dockerfiles, docker-compose, CI workflows
 - Test scaffolding, seed data
 - Boilerplate wiring (modules, providers, controllers that only delegate)

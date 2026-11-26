@@ -1,6 +1,5 @@
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import * as cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { relaxConnectAttemptTimeout } from './database/typeorm-options';
@@ -26,23 +25,6 @@ async function bootstrap() {
     }),
   );
   app.enableShutdownHooks();
-
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle('Ticket Booking API')
-    .setVersion('0.1.0')
-    // 3rd argument = the scheme NAME that @ApiCookieAuth('access_token') refers to
-    .addCookieAuth(
-      'access_token',
-      { type: 'apiKey', in: 'cookie' },
-      'access_token',
-    )
-    .addBearerAuth()
-    .build();
-  SwaggerModule.setup(
-    'docs',
-    app,
-    SwaggerModule.createDocument(app, swaggerConfig),
-  );
 
   await app.listen(process.env.PORT ?? 4000);
 }

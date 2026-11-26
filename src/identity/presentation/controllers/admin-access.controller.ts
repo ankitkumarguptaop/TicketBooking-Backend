@@ -11,14 +11,6 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { CommandBus, QueryBus } from '@nestjs/cqrs';
-import {
-  ApiBearerAuth,
-  ApiCookieAuth,
-  ApiCreatedResponse,
-  ApiNoContentResponse,
-  ApiOkResponse,
-  ApiTags,
-} from '@nestjs/swagger';
 import { ApproveAdminAccessRequestCommand } from '../../application/commands/approve-admin-access-request/approve-admin-access-request.command';
 import { CancelAdminAccessRequestCommand } from '../../application/commands/cancel-admin-access-request/cancel-admin-access-request.command';
 import { RejectAdminAccessRequestCommand } from '../../application/commands/reject-admin-access-request/reject-admin-access-request.command';
@@ -37,14 +29,6 @@ import { ListAdminAccessRequestsQueryDto } from '../dto/list-admin-access-reques
 import { SubmitAdminAccessRequestRequestDto } from '../dto/submit-admin-access-request.request.dto';
 import { JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { RolesGuard } from '../guards/roles.guard';
-
-/**
- * Admins by approval: a verified USER asks, the SUPER_ADMIN decides.
- * Routes without @Roles() are open to any signed-in user.
- */
-@ApiTags('admin-access')
-@ApiCookieAuth('access_token')
-@ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('admin-access-requests')
 export class AdminAccessController {
@@ -55,7 +39,6 @@ export class AdminAccessController {
 
   /** Ask to become an admin. One pending request at a time. */
   @Post()
-  @ApiCreatedResponse({ type: AdminAccessRequestResponseDto })
   submit(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: SubmitAdminAccessRequestRequestDto,
@@ -68,7 +51,6 @@ export class AdminAccessController {
 
   /** My own requests, newest first (to show "pending" / "rejected: <note>"). */
   @Get('mine')
-  @ApiOkResponse({ type: [AdminAccessRequestResponseDto] })
   mine(
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<AdminAccessRequestResponseDto[]> {
@@ -81,7 +63,6 @@ export class AdminAccessController {
   /** Withdraw my pending request. */
   @Post(':id/cancel')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiNoContentResponse()
   async cancel(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe()) id: string,
@@ -94,7 +75,6 @@ export class AdminAccessController {
   /** The super admin's queue (?status=PENDING) or history. */
   @Get()
   @Roles(UserRole.SUPER_ADMIN)
-  @ApiOkResponse({ type: [AdminAccessRequestResponseDto] })
   list(
     @Query() query: ListAdminAccessRequestsQueryDto,
   ): Promise<AdminAccessRequestResponseDto[]> {
@@ -111,7 +91,6 @@ export class AdminAccessController {
   @Post(':id/approve')
   @HttpCode(HttpStatus.OK)
   @Roles(UserRole.SUPER_ADMIN)
-  @ApiOkResponse({ type: AdminAccessRequestResponseDto })
   approve(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe()) id: string,
@@ -126,7 +105,6 @@ export class AdminAccessController {
   @Post(':id/reject')
   @HttpCode(HttpStatus.OK)
   @Roles(UserRole.SUPER_ADMIN)
-  @ApiOkResponse({ type: AdminAccessRequestResponseDto })
   reject(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe()) id: string,

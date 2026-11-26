@@ -9,13 +9,6 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { CommandBus } from '@nestjs/cqrs';
-import {
-  ApiBearerAuth,
-  ApiCookieAuth,
-  ApiOkResponse,
-  ApiParam,
-  ApiTags,
-} from '@nestjs/swagger';
 import { ConfirmVerificationCodeCommand } from '../../application/commands/confirm-verification-code/confirm-verification-code.command';
 import { SendVerificationCodeCommand } from '../../application/commands/send-verification-code/send-verification-code.command';
 import { VerificationCodeSentView } from '../../application/commands/send-verification-code/send-verification-code.handler';
@@ -30,11 +23,6 @@ import { UserProfileResponseDto } from '../dto/user-profile.response.dto';
 import { VerificationCodeSentResponseDto } from '../dto/verification-code-sent.response.dto';
 import { JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { parseChannel } from '../pipes/parse-channel.pipe';
-
-/** The signed-in user proves they own their email address and phone number. */
-@ApiTags('users')
-@ApiCookieAuth('access_token')
-@ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
 @Controller('users/me/verification')
 export class VerificationController {
@@ -43,8 +31,6 @@ export class VerificationController {
   /** Sends a new 6-digit code. 429 inside the 60 s resend cooldown. */
   @Post(':channel/send')
   @HttpCode(HttpStatus.OK)
-  @ApiParam({ name: 'channel', enum: ['email', 'phone'] })
-  @ApiOkResponse({ type: VerificationCodeSentResponseDto })
   send(
     @CurrentUser() user: AuthenticatedUser,
     @Param('channel', parseChannel) channel: ContactChannel,
@@ -59,8 +45,6 @@ export class VerificationController {
   @Post(':channel/confirm')
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')
-  @ApiParam({ name: 'channel', enum: ['email', 'phone'] })
-  @ApiOkResponse({ type: UserProfileResponseDto })
   confirm(
     @CurrentUser() user: AuthenticatedUser,
     @Param('channel', parseChannel) channel: ContactChannel,

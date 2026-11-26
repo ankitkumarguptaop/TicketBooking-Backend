@@ -15,13 +15,6 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { CommandBus, QueryBus } from '@nestjs/cqrs';
-import {
-  ApiCookieAuth,
-  ApiNoContentResponse,
-  ApiOkResponse,
-  ApiTags,
-  ApiUnauthorizedResponse,
-} from '@nestjs/swagger';
 import { Request, Response } from 'express';
 import { AuthTokens } from '../../application/commands/auth-tokens';
 import { LoginUserCommand } from '../../application/commands/login-user/login-user.command';
@@ -39,7 +32,7 @@ import {
 } from '../../application/ports/verification-token.port';
 import { EmailNotVerifiedError } from '../../domain/errors/identity.errors';
 import { SessionDevice } from '../../domain/session/auth-session.aggregate';
-import { AuthCookies, ACCESS_TOKEN_COOKIE } from '../cookies/auth-cookies';
+import { AuthCookies } from '../cookies/auth-cookies';
 import {
   AuthenticatedUser,
   CurrentUser,
@@ -52,8 +45,6 @@ import { RegisterUserRequestDto } from '../dto/register-user.request.dto';
 import { RegisterUserResponseDto } from '../dto/register-user.response.dto';
 import { SessionResponseDto } from '../dto/session.response.dto';
 import { JwtAuthGuard } from '../guards/jwt-auth.guard';
-
-@ApiTags('auth')
 @Controller('auth')
 export class AuthController {
   constructor(
@@ -91,7 +82,6 @@ export class AuthController {
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')
-  @ApiOkResponse({ type: LoginResponseDto })
   async login(
     @Body() dto: LoginUserRequestDto,
     @Req() req: Request,
@@ -131,8 +121,6 @@ export class AuthController {
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')
-  @ApiOkResponse({ type: RefreshResponseDto })
-  @ApiUnauthorizedResponse({ description: 'Session invalid, sign in again' })
   async refresh(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
@@ -153,7 +141,6 @@ export class AuthController {
   /** Logs out THIS device. Always succeeds and always clears cookies. */
   @Post('logout')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiNoContentResponse()
   async logout(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
@@ -171,8 +158,6 @@ export class AuthController {
   @Post('logout-all')
   @HttpCode(HttpStatus.OK)
   @UseGuards(JwtAuthGuard)
-  @ApiCookieAuth(ACCESS_TOKEN_COOKIE)
-  @ApiOkResponse({ type: LogoutAllResponseDto })
   async logoutAll(
     @CurrentUser() user: AuthenticatedUser,
     @Res({ passthrough: true }) res: Response,
@@ -187,8 +172,6 @@ export class AuthController {
 
   @Get('sessions')
   @UseGuards(JwtAuthGuard)
-  @ApiCookieAuth(ACCESS_TOKEN_COOKIE)
-  @ApiOkResponse({ type: [SessionResponseDto] })
   listSessions(
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<SessionResponseDto[]> {
@@ -201,8 +184,6 @@ export class AuthController {
   @Delete('sessions/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(JwtAuthGuard)
-  @ApiCookieAuth(ACCESS_TOKEN_COOKIE)
-  @ApiNoContentResponse()
   async revokeSession(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe()) sessionId: string,
