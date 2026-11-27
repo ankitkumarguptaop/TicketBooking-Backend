@@ -1,6 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { QueryFailedError, Repository } from 'typeorm';
+import { DataSource, QueryFailedError } from 'typeorm';
 import { AdminAccessRequest } from '../../domain/admin-access/admin-access-request.aggregate';
 import { AdminAccessRequestRepository } from '../../domain/ports/admin-access-request.repository';
 import { AdminAccessRequestStatus } from '../../domain/admin-access/admin-access-request-status.enum';
@@ -15,50 +14,81 @@ import { AdminAccessRequestOrmEntity } from '../entities/admin-access-request.or
 
 const PG_UNIQUE_VIOLATION = '23505';
 
+/** Aliased to the AdminAccessRequestOrmEntity field names, so the mapper reads rows as-is. */
+const REQUEST_COLUMNS = `
+  id, user_id AS "userId", reason, status, requested_at AS "requestedAt",
+  decided_at AS "decidedAt", decided_by AS "decidedBy",
+  decision_note AS "decisionNote", version
+`;
+
 @Injectable()
 export class TypeOrmAdminAccessRequestRepository implements AdminAccessRequestRepository {
   constructor(
-    @InjectRepository(AdminAccessRequestOrmEntity)
-    private readonly orm: Repository<AdminAccessRequestOrmEntity>,
+    private readonly dataSource: DataSource,
     private readonly outbox: OutboxRelay,
   ) {}
 
   async findById(id: string): Promise<AdminAccessRequest | null> {
-    const row = await this.orm.findOneBy({ id });
-    return row ? AdminAccessRequestMapper.toDomain(row) : null;
+    const rows = await this.dataSource.query<AdminAccessRequestOrmEntity[]>(
+      `SELECT ${REQUEST_COLUMNS} FROM identity.admin_access_requests WHERE id = $1`,
+      [id],
+    );
+    return rows[0] ? AdminAccessRequestMapper.toDomain(rows[0]) : null;
   }
 
   async findPendingByUserId(
     userId: string,
   ): Promise<AdminAccessRequest | null> {
-    const row = await this.orm.findOneBy({
-      userId,
-      status: AdminAccessRequestStatus.PENDING,
-    });
-    return row ? AdminAccessRequestMapper.toDomain(row) : null;
+    const rows = await this.dataSource.query<AdminAccessRequestOrmEntity[]>(
+      `SELECT ${REQUEST_COLUMNS}
+         FROM identity.admin_access_requests
+        WHERE user_id = $1 AND status = $2`,
+      [userId, AdminAccessRequestStatus.PENDING],
+    );
+    return rows[0] ? AdminAccessRequestMapper.toDomain(rows[0]) : null;
   }
 
   async save(request: AdminAccessRequest): Promise<void> {
     const changed = AdminAccessRequestMapper.toChangedColumns(request);
     try {
-      await this.orm.manager.transaction(async (manager) => {
+      await this.dataSource.transaction(async (manager) => {
         if (request.version === 0) {
-          await manager.insert(AdminAccessRequestOrmEntity, {
-            id: request.id,
-            userId: request.userId,
-            reason: request.reason,
-            requestedAt: request.requestedAt,
-            version: 1,
-            ...changed,
-          });
+          await manager.query(
+            `INSERT INTO identity.admin_access_requests
+               (id, user_id, reason, requested_at, version, status,
+                decided_at, decided_by, decision_note)
+             VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8)`,
+            [
+              request.id,
+              request.userId,
+              request.reason,
+              request.requestedAt,
+              changed.status,
+              changed.decidedAt,
+              changed.decidedBy,
+              changed.decisionNote,
+            ],
+          );
         } else {
           // Compare-and-swap: two super-admin tabs can't both decide it.
-          const result = await manager.update(
-            AdminAccessRequestOrmEntity,
-            { id: request.id, version: request.version },
-            { ...changed, version: request.version + 1 },
+          const [, affected] = await manager.query<[unknown, number]>(
+            `UPDATE identity.admin_access_requests
+                SET status        = $3,
+                    decided_at    = $4,
+                    decided_by    = $5,
+                    decision_note = $6,
+                    version       = version + 1
+              WHERE id = $1 AND version = $2`,
+            [
+              request.id,
+              request.version,
+              changed.status,
+              changed.decidedAt,
+              changed.decidedBy,
+              changed.decisionNote,
+            ],
           );
-          if (result.affected !== 1) {
+          if (affected !== 1) {
             throw new ConcurrentAdminAccessUpdateError();
           }
         }

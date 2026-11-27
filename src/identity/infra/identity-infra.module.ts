@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
-import { TypeOrmModule } from '@nestjs/typeorm';
 import { jwtModuleOptions } from '../../shared/infra/auth/jwt-options';
 import { ACCESS_TOKEN_ISSUER } from '../domain/ports/access-token-issuer.port';
 import { ADMIN_ACCESS_READ_MODEL } from '../domain/ports/admin-access-read-model.port';
@@ -23,16 +22,11 @@ import { VerificationTokenGuard } from './http/verification-token.guard';
 import { LogSmsSender } from './messaging/log-sms-sender.adapter';
 import { NodemailerEmailSender } from './messaging/nodemailer-email-sender.adapter';
 import { OutboxRelay } from './messaging/outbox-relay.service';
-import { AdminAccessRequestOrmEntity } from './entities/admin-access-request.orm-entity';
-import { AuthSessionOrmEntity } from './entities/auth-session.orm-entity';
-import { OutboxMessageOrmEntity } from './entities/outbox-message.orm-entity';
 import { TypeOrmAdminAccessReadModel } from './repository/typeorm-admin-access.read-model';
 import { TypeOrmAdminAccessRequestRepository } from './repository/typeorm-admin-access-request.repository';
 import { TypeOrmAuthSessionRepository } from './repository/typeorm-auth-session.repository';
 import { TypeOrmUserRepository } from './repository/typeorm-user.repository';
 import { TypeOrmVerificationCodeRepository } from './repository/typeorm-verification-code.repository';
-import { UserOrmEntity } from './entities/user.orm-entity';
-import { VerificationCodeOrmEntity } from './entities/verification-code.orm-entity';
 import { Argon2PasswordHasher } from './security/argon2-password-hasher.adapter';
 import { HmacOtpCodec } from './security/hmac-otp-codec.adapter';
 import { HmacRefreshTokenCodec } from './security/hmac-refresh-token-codec.adapter';
@@ -63,13 +57,6 @@ const PORTS = [
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
-      UserOrmEntity,
-      AuthSessionOrmEntity,
-      VerificationCodeOrmEntity,
-      AdminAccessRequestOrmEntity,
-      OutboxMessageOrmEntity,
-    ]),
     // Signs access tokens with the same options AuthModule verifies them with.
     JwtModule.registerAsync({
       inject: [ConfigService],

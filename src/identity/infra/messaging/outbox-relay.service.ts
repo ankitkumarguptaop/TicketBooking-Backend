@@ -8,11 +8,16 @@ import { ConfigService } from '@nestjs/config';
 import { EventBus } from '@nestjs/cqrs';
 import { DataSource } from 'typeorm';
 import { deserializeEvent } from './identity-event-registry';
-import { OutboxMessageOrmEntity } from '../entities/outbox-message.orm-entity';
 
 const BATCH_SIZE = 100;
 /** After this many failed publishes a row is left for a human to look at. */
 const MAX_ATTEMPTS = 10;
+
+interface PendingRow {
+  id: string;
+  eventType: string;
+  payload: object;
+}
 
 /**
  * Moves events from identity.outbox to the event bus.
@@ -83,33 +88,35 @@ export class OutboxRelay implements OnApplicationBootstrap, OnModuleDestroy {
 
   private publishBatch(): Promise<number> {
     return this.dataSource.transaction(async (manager) => {
-      const rows = await manager
-        .getRepository(OutboxMessageOrmEntity)
-        .createQueryBuilder('o')
-        .where('o.published_at IS NULL')
-        .andWhere('o.attempts < :max', { max: MAX_ATTEMPTS })
-        .orderBy('o.occurred_at', 'ASC')
-        .limit(BATCH_SIZE)
-        .setLock('pessimistic_write')
-        .setOnLocked('skip_locked')
-        .getMany();
+      const rows = await manager.query<PendingRow[]>(
+        `SELECT id, event_type AS "eventType", payload
+           FROM identity.outbox
+          WHERE published_at IS NULL
+            AND attempts < $1
+          ORDER BY occurred_at ASC
+          LIMIT $2
+            FOR UPDATE SKIP LOCKED`,
+        [MAX_ATTEMPTS, BATCH_SIZE],
+      );
 
       const now = new Date();
       for (const row of rows) {
         try {
           this.eventBus.publish(deserializeEvent(row.eventType, row.payload));
-          await manager.update(
-            OutboxMessageOrmEntity,
-            { id: row.id },
-            { publishedAt: now, lastError: null },
+          await manager.query(
+            `UPDATE identity.outbox
+                SET published_at = $2, last_error = NULL
+              WHERE id = $1`,
+            [row.id, now],
           );
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           this.logger.error(`Outbox event ${row.id} failed: ${message}`);
-          await manager.update(
-            OutboxMessageOrmEntity,
-            { id: row.id },
-            { attempts: row.attempts + 1, lastError: message.slice(0, 2000) },
+          await manager.query(
+            `UPDATE identity.outbox
+                SET attempts = attempts + 1, last_error = $2
+              WHERE id = $1`,
+            [row.id, message.slice(0, 2000)],
           );
         }
       }

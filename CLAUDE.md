@@ -9,7 +9,7 @@ Backend for a **movie ticket booking platform**, built as a learning/portfolio p
 Core flow to get right: **hold seats → pay → confirm → notify**.
 
 ### Current state
-- NestJS 11, npm (`package-lock.json`), Jest, ESLint, Prettier. `identity` is built; other contexts not started.
+- NestJS 11, npm (`package-lock.json`), Jest, ESLint, Prettier. `identity` is built; `catalog` (movies, theatres/screens/seat layouts, shows) is scaffolded (infra, migrations, read side, controllers); its domain (Movie, Theatre, Screen, Show, ShowScheduler), repositories, mappers and command handlers are still to be written. Other contexts are not started.
 - Strategy: **modular monolith first** (one NestJS app, strict module boundaries), split into 5 services + gateway in Phase 5. Do not introduce microservices or a monorepo split before the plan calls for it. RabbitMQ arrives in Phase 3 for delayed jobs (hold expiry) and becomes the service-to-service event bus in Phase 5.
 
 ## Commands
@@ -34,6 +34,8 @@ DB config is one factory, `typeOrmConfig(contextName)` in `src/shared/infra/data
 
 Migrations live per context in `src/<context>/infra/migrations/` and touch only that context's schema. `DB_SYNCHRONIZE` stays `false`.
 
+**One table per migration.** Each `Create<Context><Table>` migration creates exactly one table, together with what only that table needs (its enum types, indexes, constraints). An enum shared by several tables goes in the migration of the first table that uses it. Timestamps follow FK order: a referenced table gets an earlier timestamp than the table that references it. A later change to a table goes in its own new migration (`Add…`/`Alter…`). Never edit or split a migration that has already been applied or committed; add a new one.
+
 ## How Claude should help (important)
 
 This is a **learning project**; the developer must be able to explain every line in an interview.
@@ -55,7 +57,7 @@ When asked to review: point to lines and explain which rule is broken; don't sil
 ## Architecture rules
 
 ### Bounded contexts (modules under `src/`)
-`identity`, `catalog`, `venue`, `scheduling`, `booking` (core), `payment`, `notification`, `review`.
+`identity`, `catalog` (movies, theatres, screens + seat layouts, shows), `booking` (core), `payment`, `notification`, `review`.
 Modules **must not** import another module's domain, infra or features, or read its tables.
 
 **Database:** one PostgreSQL database, **one schema per bounded context**, with the same names as the modules above. Every entity sets its schema (`@Entity({ schema: 'identity', name: 'users' })`). No cross-schema joins, foreign keys or queries: reference other contexts by id only. A module's migrations touch only its own schema. See `docs/REQUIREMENTS.md` §5.1. Cross-context communication is via domain events (in-process event bus now, RabbitMQ later) or a narrow port.
@@ -94,6 +96,7 @@ Dependencies point inward only: features/infra → domain. `shared/` never impor
 - Create aggregates through factories (`Booking.create(...)`) so invalid state can't exist.
 - Value objects are immutable (`Money`, `SeatRef`, `TimeSlot`, `HoldWindow`).
 - Repository interface lives in `domain/ports/`; TypeORM implementation in `infra/repository/`.
+- **Raw SQL only.** Repositories, read models, outbox writer/relay talk to the DB with `dataSource.query()` / `manager.query()` and parameterised SQL (`$1, $2…`). No ORM methods (`find*`, `save`, `insert`, `update`, `existsBy`, `createQueryBuilder`, `@InjectRepository`/`forFeature`). Select columns aliased to the ORM entity's field names (`user_id AS "userId"`) so mappers stay unchanged; for UPDATE/DELETE read the affected count with `const [, affected] = await manager.query<[unknown, number]>(...)`. ORM entities stay only to describe the schema for `migration:generate`.
 - Feature handlers: load → call domain → save. The repository writes the aggregate's events to the context's outbox in the same transaction; a relay publishes them (ADR 005). No business rules in handlers.
 - Light CQRS via `@nestjs/cqrs`: commands mutate aggregates; queries read flat rows directly.
 - Domain errors are mapped to HTTP status codes in **one** exception filter.

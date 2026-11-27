@@ -49,9 +49,7 @@ Build one flow deeply — **hold seats → pay → confirm → notify** — as a
 | Context | Type | Aggregate roots | Invariants | Events published |
 |---|---|---|---|---|
 | **Identity** | Generic | `User` | Email unique. Only admins reach admin APIs | `UserRegistered` |
-| **Catalog** | Supporting | `Movie` | Runtime, language, certificate required before scheduling | `MovieAdded` |
-| **Venue** | Supporting | `Theatre`, `Screen` (owns seat layout) | Seat numbers unique within a screen. Layout with future shows cannot be deleted | `ScreenLayoutChanged` |
-| **Scheduling** | Supporting | `Show` | Shows on one screen never overlap (incl. cleaning gap). Show needs a price per seat category | `ShowScheduled`, `ShowCancelled` |
+| **Catalog** | Supporting | `Movie`, `Theatre`, `Screen` (owns seat layout), `Show` | Runtime, language, certificate required before scheduling. Seat numbers unique within a screen. Layout with future shows cannot be deleted. Shows on one screen never overlap (incl. cleaning gap). Show needs a price per seat category | `MovieAdded`, `ScreenLayoutChanged`, `ShowScheduled`, `ShowCancelled` |
 | **Booking** | **Core** | `Booking`, `ShowSeat` | A seat for a show is sold at most once. Hold ends after 10 min. Booking confirmed only after payment. ≤ 10 seats per booking | `SeatsHeld`, `BookingConfirmed`, `BookingExpired`, `BookingCancelled`, `BookingRejected` |
 | **Payment** | Generic | `Payment` (owns refunds) | Booking charged once. Total refunds ≤ amount paid | `PaymentSucceeded`, `PaymentFailed`, `RefundProcessed` |
 | **Notification** | Generic | none (reacts only) | Each event sends at most one message | — |
@@ -59,7 +57,7 @@ Build one flow deeply — **hold seats → pay → confirm → notify** — as a
 
 ### Ubiquitous language
 Use: **Show, Screen, Seat, ShowSeat, SeatHold, Booking, Payment, Refund**. Never "Order" or "Item".
-- *Seat* (Venue) = a physical chair (row G, number 12, recliner).
+- *Seat* (Catalog) = a physical chair (row G, number 12, recliner).
 - *ShowSeat* (Booking) = that chair for one show, with price and status.
 
 ### Key modelling decision
@@ -90,7 +88,7 @@ Two Next.js apps → one NestJS API gateway → 5 services sharing **one Postgre
 | Service | Contexts |
 |---|---|
 | `identity-service` | Identity |
-| `catalog-service` | Catalog, Venue, Scheduling, Review (separate modules) |
+| `catalog-service` | Catalog (movies, theatres, screens, shows), Review (separate modules) |
 | `booking-service` | Booking (scales independently) |
 | `payment-service` | Payment |
 | `notification-service` | Notification |
@@ -103,9 +101,7 @@ A single PostgreSQL database (`ticket_booking`) with one schema per bounded cont
 | Schema | Owner module → service | Example tables |
 |---|---|---|
 | `identity` | identity → identity-service | `users`, `refresh_tokens` |
-| `catalog` | catalog → catalog-service | `movies` |
-| `venue` | venue → catalog-service | `theatres`, `screens`, `seats` |
-| `scheduling` | scheduling → catalog-service | `shows`, `show_prices` |
+| `catalog` | catalog → catalog-service | `movies`, `theatres`, `screens`, `seats`, `shows`, `show_prices`, `outbox` |
 | `booking` | booking → booking-service | `bookings`, `booking_seats`, `show_seats`, `outbox`, `processed_events`, `idempotency_keys` |
 | `payment` | payment → payment-service | `payments`, `refunds`, `outbox`, `processed_events`, `idempotency_keys` |
 | `notification` | notification → notification-service | `notifications`, `processed_events` |
@@ -113,7 +109,7 @@ A single PostgreSQL database (`ticket_booking`) with one schema per bounded cont
 
 Rules:
 - Every TypeORM entity declares its schema: `@Entity({ schema: 'booking', name: 'show_seats' })`.
-- **No cross-schema joins, foreign keys or queries.** Other contexts are referenced by id only (e.g. `show_seats.show_id` is a plain `uuid`, not an FK to `scheduling.shows`). Data from another context arrives via events or an application port.
+- **No cross-schema joins, foreign keys or queries.** Other contexts are referenced by id only (e.g. `show_seats.show_id` is a plain `uuid`, not an FK to `catalog.shows`). Data from another context arrives via events or an application port.
 - Each module owns its migrations, which only touch its own schema.
 - Outbox / `processed_events` / idempotency tables live inside each owning schema, so the state change and its event commit in the same transaction.
 - Optional hardening (Phase 5+): one DB role per service with `USAGE` only on its own schema, so a cross-schema read fails at the database.
@@ -299,7 +295,7 @@ Read replicas, partitioning `ShowSeat` by show date, virtual waiting room, CDN, 
 | Phase | Weeks | Build | Done when |
 |---|---|---|---|
 | 0. Design | 1 | Glossary, context map, aggregates + invariants, HLD diagram, ADR‑001 (modular monolith first) | Can explain every aggregate boundary in 5 min |
-| 1. Foundation | 2–3 | Monorepo; NestJS app with Identity, Catalog, Venue modules; signup/login/refresh rotation/roles; admin APIs for movies, theatres, screens, layouts; Docker Compose | Domain unit tests run with no DB; Swagger shows all APIs; `docker compose up` starts everything |
+| 1. Foundation | 2–3 | Monorepo; NestJS app with Identity and Catalog modules; signup/login/refresh rotation/roles; admin APIs for movies, theatres, screens, layouts; Docker Compose | Domain unit tests run with no DB; Swagger shows all APIs; `docker compose up` starts everything |
 | 2. Scheduling & listing | 4 | Show aggregate, overlap rule, auto scheduler, listing by city/date/movie, Next.js admin panel | Overlapping shows rejected at domain **and** DB level |
 | 3. Booking core | 5–6 | ShowSeat creation from `ShowScheduled`, seat hold, Booking state machine, hold expiry, live seat map | 200 parallel requests → exactly one wins; hold frees after 10 min |
 | 4. Payment & cancellation | 7 | Stripe test mode, payment module, confirm flow, late-payment refund, cancellation + refund policy, QR ticket email | Kill app between payment and confirmation, restart → booking still confirms |

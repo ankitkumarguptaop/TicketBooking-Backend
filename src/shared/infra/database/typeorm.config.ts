@@ -17,8 +17,6 @@ export function relaxConnectAttemptTimeout(): void {
 const CONTEXT_SCHEMAS = {
   identity: 'identity',
   catalog: 'catalog',
-  venue: 'venue',
-  scheduling: 'scheduling',
   booking: 'booking',
   payment: 'payment',
   notification: 'notification',

@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { CatalogModule } from './catalog/catalog.module';
 import { IdentityModule } from './identity/identity.module';
 import { IdentityInfraModule } from './identity/infra/identity-infra.module';
 import { RepositoryActiveSessionChecker } from './identity/infra/security/repository-active-session-checker.adapter';
@@ -14,6 +15,7 @@ import { SharedModule } from './shared/shared.module';
       sessionChecker: RepositoryActiveSessionChecker,
     }),
     IdentityModule,
+    CatalogModule,
   ],
 })
 export class AppModule {}
